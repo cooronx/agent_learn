@@ -7,18 +7,15 @@ use crossterm::{
 };
 use futures::{FutureExt, StreamExt};
 use ratatui::{
-    DefaultTerminal, Frame,
-    buffer::{Buffer, CellDiffOption},
-    layout::{Constraint, Layout, Rect},
-    style::{Style, Stylize},
-    text::Line,
-    widgets::{Block, Paragraph},
+    DefaultTerminal, Frame, buffer::{Buffer, CellDiffOption}, layout::{Constraint, Layout, Rect}, style::{Color, Style, Stylize}, text::{Line, Span}, widgets::{Block, Paragraph, Wrap},
 };
 use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
 
 use crate::types::{
-    Message, Role::{self, Assistant, User as TuiUser}, UserCommand,
+    Message,
+    Role::{self, Assistant, User as TuiUser},
+    UserCommand,
 };
 
 #[derive(Debug)]
@@ -85,14 +82,41 @@ impl App<'_> {
             .split(frame.area());
         let mut lines = Vec::default();
         for message in &self.display_message {
-            for line in message.content.split("\n") {
-                lines.push(Line::from(line));
+            let (prefix, prefix_style, content_style) = match message.role {
+                TuiUser => (
+                    "› ",
+                    Style::default().fg(Color::Cyan).bg(Color::Green).bold(),
+                    Style::default().fg(Color::White).bg(Color::Green),
+                ),
+                Assistant => (
+                    "• ",
+                    Style::default().fg(Color::Green).bold(),
+                    Style::default().fg(Color::White),
+                ),
+                Role::Error => (
+                    "× ",
+                    Style::default().fg(Color::Red).bold(),
+                    Style::default().fg(Color::LightRed),
+                ),
+            };
+            for (line_index, content) in message.content.split("\n").enumerate() {
+                let current_prefix = if line_index == 0 {
+                    prefix
+                } else {
+                    "  "
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(current_prefix, prefix_style),
+                    Span::styled(content, content_style),
+                ]));
             }
             lines.push(Line::default());
         }
-        let para1 = Paragraph::new(lines).block(Block::bordered().title(title));
-        
-        frame.render_widget(para1, trunks[0]);
+        let para_main = Paragraph::new(lines)
+            .block(Block::bordered().title(title))
+            .wrap(Wrap { trim: false });
+
+        frame.render_widget(para_main, trunks[0]);
         frame.render_widget(&self.inputs, trunks[1]);
         force_redraw_area(frame.buffer_mut(), trunks[1]);
     }
@@ -126,7 +150,10 @@ impl App<'_> {
             (_, KeyCode::Enter) => {
                 // 后面用于给ai发送消息
                 let msg = self.inputs.lines().join("\n");
-                self.display_message.push(DisplayMessage { role: TuiUser, content: msg.clone() });
+                self.display_message.push(DisplayMessage {
+                    role: TuiUser,
+                    content: msg.clone(),
+                });
                 self.message_sender
                     .send(Message::UserMessage(UserCommand::Submit(msg)))
                     .await?;

@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     color_eyre::install()?;
     let terminal = ratatui::init();
     // 这个是用来用户和agent之间交互的通道
