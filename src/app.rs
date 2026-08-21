@@ -182,7 +182,15 @@ impl App<'_> {
                 crate::types::AgentEvent::Delta(s) => {
                     if let Some(index) = self.current_assitant_index {
                         if let Some(display_str) = self.display_message.get_mut(index) {
-                            display_str.content.push_str(s.as_str());
+                            match s {
+                                crate::types::ChoiceDelta::OutputDelta(output_str) => {
+                                    display_str.content.push_str(&output_str);
+                                },
+                                crate::types::ChoiceDelta::ReasoningDelta(reasoning_str) => {
+                                    display_str.content.push_str(&reasoning_str);
+                                },
+                            }
+                            ;
                         }
                     }
                 }

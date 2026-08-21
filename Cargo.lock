@@ -28,6 +28,8 @@ dependencies = [
  "futures",
  "ratatui",
  "ratatui-textarea",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

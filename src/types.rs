@@ -11,9 +11,15 @@ pub enum Message {
 }
 
 #[derive(Debug)]
+pub enum ChoiceDelta {
+    OutputDelta(String),
+    ReasoningDelta(String),
+}
+
+#[derive(Debug)]
 pub enum AgentEvent {
     Started,
-    Delta(String),
+    Delta(ChoiceDelta),
     Done,
     Error(String),
 }

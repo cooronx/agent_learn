@@ -2,6 +2,8 @@ use async_openai::{Client, config::OpenAIConfig};
 
 use color_eyre::{Result, eyre::Context};
 
+pub mod openai_compatible;
+
 pub struct ModelSetup {
     pub client: async_openai::Client<OpenAIConfig>,
     pub model: String,
