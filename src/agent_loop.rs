@@ -1,8 +1,13 @@
 use tokio::sync::mpsc;
 
 use crate::{
-    api::{ModelSetup, openai_compatible::OpenAICompatibleChunk}, types::{
-        self, AgentEvent::{self, Delta, Done, Error, Started}, ChoiceDelta::{OutputDelta, ReasoningDelta}, Message::{self, AgentMessage}, UserCommand,
+    api::{ModelSetup, openai_compatible::OpenAICompatibleChunk},
+    types::{
+        self,
+        AgentEvent::{self, Delta, Done, Error, Started},
+        ChoiceDelta::{OutputDelta, ReasoningDelta},
+        Message::{self, AgentMessage},
+        UserCommand,
     },
 };
 use async_openai::{
@@ -87,13 +92,18 @@ impl Agent {
         request: CreateChatCompletionRequest,
     ) -> color_eyre::Result<()> {
         self.sender.send(Message::AgentMessage(Started)).await?;
-        let mut stream = self.client.chat().create_stream_byot::<_,OpenAICompatibleChunk>(request).await?;
+        let mut stream = self
+            .client
+            .chat()
+            .create_stream_byot::<_, OpenAICompatibleChunk>(request)
+            .await?;
         while let Some(result) = stream.next().await {
             let resp = result?;
             if let Some(choice) = resp.choices.first() {
                 // 新加入的推理过程
                 if let Some(reasoning_content) = &choice.delta.reasoning_content {
-                    let reasoning_content = AgentMessage(Delta(ReasoningDelta(reasoning_content.clone())));
+                    let reasoning_content =
+                        AgentMessage(Delta(ReasoningDelta(reasoning_content.clone())));
                     self.sender.send(reasoning_content).await?;
                 }
 

@@ -7,7 +7,12 @@ use crossterm::{
 };
 use futures::{FutureExt, StreamExt};
 use ratatui::{
-    DefaultTerminal, Frame, buffer::{Buffer, CellDiffOption}, layout::{Constraint, Layout, Rect}, style::{Color, Style, Stylize}, text::{Line, Span}, widgets::{Block, Paragraph, Wrap},
+    DefaultTerminal, Frame,
+    buffer::{Buffer, CellDiffOption},
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Style, Stylize},
+    text::{Line, Span},
+    widgets::{Block, Paragraph, Wrap},
 };
 use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
@@ -21,6 +26,7 @@ use crate::types::{
 #[derive(Debug)]
 struct DisplayMessage {
     role: Role,
+    reasoning_content: String,
     content: String,
 }
 
@@ -82,29 +88,44 @@ impl App<'_> {
             .split(frame.area());
         let mut lines = Vec::default();
         for message in &self.display_message {
-            let (prefix, prefix_style, content_style) = match message.role {
+            let (prefix, prefix_style, content_style, reasoning_style) = match message.role {
                 TuiUser => (
                     "› ",
                     Style::default().fg(Color::Cyan).bg(Color::Green).bold(),
                     Style::default().fg(Color::White).bg(Color::Green),
+                    None,
                 ),
                 Assistant => (
                     "• ",
                     Style::default().fg(Color::Green).bold(),
                     Style::default().fg(Color::White),
+                    Some(Style::default().fg(Color::DarkGray).italic()),
                 ),
                 Role::Error => (
                     "× ",
                     Style::default().fg(Color::Red).bold(),
                     Style::default().fg(Color::LightRed),
+                    None,
                 ),
             };
+            // 渲染当前这条消息的 reasoning
+            if !message.reasoning_content.is_empty() {
+                if let Some(reasoning_style) = reasoning_style {
+                    for reasoning_line in message.reasoning_content.split('\n') {
+                        lines.push(Line::from(vec![
+                            Span::styled("┊ ", reasoning_style),
+                            Span::styled(reasoning_line, reasoning_style),
+                        ]));
+                    }
+
+                    // reasoning 和最终回答之间留一行
+                    if !message.content.is_empty() {
+                        lines.push(Line::default());
+                    }
+                }
+            }
             for (line_index, content) in message.content.split("\n").enumerate() {
-                let current_prefix = if line_index == 0 {
-                    prefix
-                } else {
-                    "  "
-                };
+                let current_prefix = if line_index == 0 { prefix } else { "  " };
                 lines.push(Line::from(vec![
                     Span::styled(current_prefix, prefix_style),
                     Span::styled(content, content_style),
@@ -153,6 +174,7 @@ impl App<'_> {
                 self.display_message.push(DisplayMessage {
                     role: TuiUser,
                     content: msg.clone(),
+                    reasoning_content: String::default(),
                 });
                 self.message_sender
                     .send(Message::UserMessage(UserCommand::Submit(msg)))
@@ -177,6 +199,7 @@ impl App<'_> {
                     self.display_message.push(DisplayMessage {
                         role: Assistant,
                         content: String::default(),
+                        reasoning_content: String::default(),
                     });
                 }
                 crate::types::AgentEvent::Delta(s) => {
@@ -185,12 +208,11 @@ impl App<'_> {
                             match s {
                                 crate::types::ChoiceDelta::OutputDelta(output_str) => {
                                     display_str.content.push_str(&output_str);
-                                },
+                                }
                                 crate::types::ChoiceDelta::ReasoningDelta(reasoning_str) => {
-                                    display_str.content.push_str(&reasoning_str);
-                                },
-                            }
-                            ;
+                                    display_str.reasoning_content.push_str(&reasoning_str);
+                                }
+                            };
                         }
                     }
                 }
