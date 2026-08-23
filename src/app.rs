@@ -11,6 +11,7 @@ use ratatui::{
     buffer::{Buffer, CellDiffOption},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
+    symbols::line,
     text::{Line, Span},
     widgets::{Block, Paragraph, Wrap},
 };
@@ -22,6 +23,16 @@ use crate::types::{
     Role::{self, Assistant, User as TuiUser},
     UserCommand,
 };
+
+// markdown的样式配置
+#[derive(Clone)]
+struct CustomMarkdownStyle;
+
+impl tui_markdown::StyleSheet for CustomMarkdownStyle {
+    fn heading_marker(&self, _: u8) -> &str {
+        ""
+    }
+}
 
 #[derive(Debug)]
 struct DisplayMessage {
@@ -108,7 +119,7 @@ impl App<'_> {
                     None,
                 ),
             };
-            // 渲染当前这条消息的 reasoning
+            // 选渲染当前这条消息的 reasoning
             if !message.reasoning_content.is_empty() {
                 if let Some(reasoning_style) = reasoning_style {
                     for reasoning_line in message.reasoning_content.split('\n') {
@@ -124,13 +135,38 @@ impl App<'_> {
                     }
                 }
             }
-            for (line_index, content) in message.content.split("\n").enumerate() {
-                let current_prefix = if line_index == 0 { prefix } else { "  " };
-                lines.push(Line::from(vec![
-                    Span::styled(current_prefix, prefix_style),
-                    Span::styled(content, content_style),
-                ]));
+            // 再渲染output
+            if !message.content.is_empty() {
+                match &message.role {
+                    Assistant => {
+                        // ai的最终回答用markdown来渲染一下，codex也是这样的
+                        let markdown_style = tui_markdown::Options::new(CustomMarkdownStyle);
+
+                        let markdown = tui_markdown::from_str_with_options(&message.content,&markdown_style);
+                        for (line_index, mut markdown_line) in
+                            markdown.lines.into_iter().enumerate()
+                        {
+                            let current_prefix = if line_index == 0 { "• " } else { "  " };
+                            markdown_line
+                                .spans
+                                .insert(0, Span::styled(current_prefix, prefix_style));
+
+                            lines.push(markdown_line);
+                        }
+                    }
+                    _ => {
+                        for (line_index, content) in message.content.split('\n').enumerate() {
+                            let current_prefix = if line_index == 0 { prefix } else { "  " };
+
+                            lines.push(Line::from(vec![
+                                Span::styled(current_prefix, prefix_style),
+                                Span::styled(content, content_style),
+                            ]));
+                        }
+                    }
+                }
             }
+
             lines.push(Line::default());
         }
         let para_main = Paragraph::new(lines)
@@ -140,22 +176,6 @@ impl App<'_> {
         frame.render_widget(para_main, trunks[0]);
         frame.render_widget(&self.inputs, trunks[1]);
         force_redraw_area(frame.buffer_mut(), trunks[1]);
-    }
-
-    async fn handle_crossterm_events(&mut self) -> Result<()> {
-        let event = self.event_stream.next().fuse().await;
-
-        match event {
-            Some(Ok(evt)) => match evt {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    self.on_key_event(key).await?
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-
-        Ok(())
     }
 
     async fn on_key_event(&mut self, key: KeyEvent) -> Result<()> {
