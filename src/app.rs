@@ -1,9 +1,7 @@
 use async_openai::types::admin::users::User;
 use color_eyre::Result;
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent}, execute, terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use futures::{FutureExt, StreamExt};
 use ratatui::{
@@ -50,6 +48,9 @@ pub struct App<'a> {
     current_assitant_index: Option<usize>,
     event_stream: EventStream,
     inputs: TextArea<'a>,
+    message_scroll: u16,
+    message_max_scroll: u16,
+    follow_tail: bool,
 }
 
 impl App<'_> {
@@ -64,6 +65,9 @@ impl App<'_> {
             current_assitant_index: None,
             event_stream: EventStream::default(),
             inputs: input,
+            message_scroll: 0,
+            message_max_scroll: 0,
+            follow_tail: false,
         }
     }
 
@@ -73,15 +77,22 @@ impl App<'_> {
             terminal.draw(|frame| self.draw(frame))?;
             tokio::select! {
                 event = self.event_stream.next() => {
-                  if let Some(Ok(Event::Key(key))) = event
-                      && key.kind == KeyEventKind::Press
-                  {
-                      self.on_key_event(key).await?;
-                  }
+                match event {
+                    Some(Ok(Event::Key(key))) => {
+                        if key.kind == KeyEventKind::Press {
+                            self.on_key_event(key).await?
+                        }
+                    },
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        self.on_mouse_event(mouse).await?
+                    }
+                    _ => {},
+                }
               }
 
                 message = self.message_recv.recv() => {
                         if let Some(msg) = message {
+                        // 收到了新的消息，那么也要切换到消息最末尾
                         self.handler_agent_message(msg).await;
                     }
                 }
@@ -102,12 +113,25 @@ impl App<'_> {
         let lines = self.gen_main_lines();
 
         let para_main = Paragraph::new(lines)
-            .block(Block::bordered().title(title))
             .wrap(Wrap { trim: false });
+
+        let area = trunks[0];
+        let content_width = area.width.saturating_sub(2);
+        let content_height = para_main.line_count(content_width);
+        let viewport_height = area.height.saturating_sub(2) as usize;
+
+        let max_scorll = content_height.saturating_sub(viewport_height).min(u16::MAX as usize) as u16;
+        let current_scoll = self.message_scroll.min(max_scorll);
+        let current_scoll = if self.follow_tail {max_scorll} else {current_scoll};
+
+        let para_main = para_main.block(Block::bordered().title(title)).scroll((current_scoll,0));
+
 
         frame.render_widget(para_main, trunks[0]);
         frame.render_widget(&self.inputs, trunks[1]);
         force_redraw_area(frame.buffer_mut(), trunks[1]);
+        self.message_scroll = current_scoll;
+        self.message_max_scroll = max_scorll;
     }
 
     async fn on_key_event(&mut self, key: KeyEvent) -> Result<()> {
@@ -131,6 +155,8 @@ impl App<'_> {
                 self.message_sender
                     .send(Message::UserMessage(UserCommand::Submit(msg)))
                     .await?;
+                // 发送消息后将输出框定位到最后一条消息
+                self.follow_tail = true;
                 // 发送完之后要清空输入框
                 self.inputs.clear();
                 Ok(())
@@ -140,6 +166,24 @@ impl App<'_> {
                 Ok(())
             }
         }
+    }
+
+    async fn on_mouse_event(&mut self,mouse_event:MouseEvent) -> Result<()> {
+        // 一次滑动多少行
+        let mouse_scorll_lines = 2;
+
+        match mouse_event.kind {
+            crossterm::event::MouseEventKind::ScrollDown => {
+                self.message_scroll = self.message_scroll.saturating_add(mouse_scorll_lines).min(self.message_max_scroll);
+                self.follow_tail = self.message_scroll == self.message_max_scroll;
+            },
+            crossterm::event::MouseEventKind::ScrollUp => {
+                self.message_scroll = self.message_scroll.saturating_sub(mouse_scorll_lines);
+                self.follow_tail = false;
+            },
+            _ => {},
+        }
+        Ok(())
     }
 
     async fn handler_agent_message(&mut self, msg: Message) {
