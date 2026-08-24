@@ -1,8 +1,6 @@
 use tokio::sync::mpsc;
 
-use crate::{
-    api::{ModelSetup, openai_compatible::OpenAICompatibleChunk},
-    types::{
+use crate::{ api::{ModelSetup, openai_compatible::OpenAICompatibleChunk}, types::{
         self,
         AgentEvent::{self, Delta, Done, Error, Started},
         ChoiceDelta::{OutputDelta, ReasoningDelta},
@@ -11,13 +9,9 @@ use crate::{
     },
 };
 use async_openai::{
-    Client,
-    config::OpenAIConfig,
-    types::{
-        admin::users::User,
-        chat::{
-            ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
-            CreateChatCompletionRequestArgs,
+    Client, config::OpenAIConfig, types::{
+        admin::users::User, chat::{
+            ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
         },
     },
 };
@@ -29,6 +23,7 @@ pub struct Agent {
     model_str: String,
     sender: mpsc::Sender<types::Message>,
     receiver: mpsc::Receiver<Message>,
+    context: Vec<ChatCompletionRequestMessage>,
 }
 
 impl Agent {
@@ -42,19 +37,16 @@ impl Agent {
             model_str: setup.model,
             sender,
             receiver,
+            context: Vec::default(),
         }
     }
 
     pub fn build_user_propmt(
         &mut self,
-        prompt: String,
     ) -> color_eyre::Result<CreateChatCompletionRequest> {
         let request = CreateChatCompletionRequestArgs::default()
             .model(&self.model_str)
-            .messages([ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt)
-                .build()?
-                .into()])
+            .messages(self.context.clone())
             .stream(true)
             .build()?;
         Ok(request)
@@ -66,7 +58,9 @@ impl Agent {
                 Message::UserMessage(user_command) => match user_command {
                     UserCommand::Submit(msg) => {
                         let ret = async {
-                            let req = self.build_user_propmt(msg)?;
+                            // 放入上下文中
+                            self.context.push(ChatCompletionRequestUserMessageArgs::default().content(msg).build()?.into());
+                            let req = self.build_user_propmt()?;
                             self.send_to_ai_with_stream(req).await
                         }
                         .await;
@@ -98,10 +92,11 @@ impl Agent {
             .chat()
             .create_stream_byot::<_, OpenAICompatibleChunk>(request)
             .await?;
+        let mut final_output = String::default();
         while let Some(result) = stream.next().await {
             let resp = result?;
             if let Some(choice) = resp.choices.first() {
-                // 新加入的推理过程
+                // 推理过程
                 if let Some(reasoning_content) = &choice.delta.reasoning_content {
                     let reasoning_content =
                         AgentMessage(Delta(ReasoningDelta(reasoning_content.clone())));
@@ -109,11 +104,13 @@ impl Agent {
                 }
 
                 if let Some(content) = &choice.delta.base.content {
+                    final_output.push_str(content);
                     let output_content = AgentMessage(Delta(OutputDelta(content.clone())));
                     self.sender.send(output_content).await?;
                 }
             }
         }
+        self.context.push(ChatCompletionRequestAssistantMessageArgs::default().content(final_output).build()?.into());
         self.sender.send(Message::AgentMessage(Done)).await?;
         Ok(())
     }
