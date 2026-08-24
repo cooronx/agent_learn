@@ -97,78 +97,10 @@ impl App<'_> {
             .centered();
         let trunks = Layout::vertical([Constraint::Percentage(90), Constraint::Percentage(10)])
             .split(frame.area());
-        let mut lines = Vec::default();
-        for message in &self.display_message {
-            let (prefix, prefix_style, content_style, reasoning_style) = match message.role {
-                TuiUser => (
-                    "› ",
-                    Style::default().fg(Color::Cyan).bg(Color::Green).bold(),
-                    Style::default().fg(Color::White).bg(Color::Green),
-                    None,
-                ),
-                Assistant => (
-                    "• ",
-                    Style::default().fg(Color::Green).bold(),
-                    Style::default().fg(Color::White),
-                    Some(Style::default().fg(Color::DarkGray).italic()),
-                ),
-                Role::Error => (
-                    "× ",
-                    Style::default().fg(Color::Red).bold(),
-                    Style::default().fg(Color::LightRed),
-                    None,
-                ),
-            };
-            // 选渲染当前这条消息的 reasoning
-            if !message.reasoning_content.is_empty() {
-                if let Some(reasoning_style) = reasoning_style {
-                    for reasoning_line in message.reasoning_content.split('\n') {
-                        lines.push(Line::from(vec![
-                            Span::styled("┊ ", reasoning_style),
-                            Span::styled(reasoning_line, reasoning_style),
-                        ]));
-                    }
 
-                    // reasoning 和最终回答之间留一行
-                    if !message.content.is_empty() {
-                        lines.push(Line::default());
-                    }
-                }
-            }
-            // 再渲染output
-            if !message.content.is_empty() {
-                match &message.role {
-                    Assistant => {
-                        // ai的最终回答用markdown来渲染一下，codex也是这样的
-                        let markdown_style = tui_markdown::Options::new(CustomMarkdownStyle);
+        // 生成需要渲染的line（以及填充格式）
+        let lines = self.gen_main_lines();
 
-                        let markdown = tui_markdown::from_str_with_options(&message.content,&markdown_style);
-                        for (line_index, mut markdown_line) in
-                            markdown.lines.into_iter().enumerate()
-                        {
-                            let current_prefix = if line_index == 0 { "• " } else { "  " };
-                            markdown_line
-                                .spans
-                                .insert(0, Span::styled(current_prefix, prefix_style));
-
-                            lines.push(markdown_line);
-                        }
-                    }
-                    _ => {
-                        for (line_index, content) in message.content.split('\n').enumerate() {
-                            let current_prefix = if line_index == 0 { prefix } else { "  " };
-
-                            lines.push(Line::from(vec![
-                                Span::styled(current_prefix, prefix_style),
-                                Span::styled(content, content_style),
-                            ]));
-                        }
-                    }
-                }
-            }
-
-            lines.push(Line::default());
-        }
         let para_main = Paragraph::new(lines)
             .block(Block::bordered().title(title))
             .wrap(Wrap { trim: false });
@@ -256,8 +188,86 @@ impl App<'_> {
     fn quit(&mut self) {
         self.running = false;
     }
+
+    fn gen_main_lines(&self) -> Vec<Line<'_>> {
+        let mut lines = Vec::default();
+        // 每次都遍历所有可展示信息（对话长了之后，对性能影响很大）
+        for message in &self.display_message {
+            let (prefix, prefix_style, content_style, reasoning_style) = match message.role {
+                TuiUser => (
+                    "› ",
+                    Style::default().fg(Color::Cyan).bg(Color::Green).bold(),
+                    Style::default().fg(Color::White).bg(Color::Green),
+                    None,
+                ),
+                Assistant => (
+                    "• ",
+                    Style::default().fg(Color::Green).bold(),
+                    Style::default().fg(Color::White),
+                    Some(Style::default().fg(Color::DarkGray).italic()),
+                ),
+                Role::Error => (
+                    "× ",
+                    Style::default().fg(Color::Red).bold(),
+                    Style::default().fg(Color::LightRed),
+                    None,
+                ),
+            };
+            // 选渲染当前这条消息的 reasoning
+            if !message.reasoning_content.is_empty() {
+                if let Some(reasoning_style) = reasoning_style {
+                    for reasoning_line in message.reasoning_content.split('\n') {
+                        lines.push(Line::from(vec![
+                            Span::styled("┊ ", reasoning_style),
+                            Span::styled(reasoning_line, reasoning_style),
+                        ]));
+                    }
+
+                    // reasoning 和最终回答之间留一行
+                    if !message.content.is_empty() {
+                        lines.push(Line::default());
+                    }
+                }
+            }
+            // 再渲染output
+            if !message.content.is_empty() {
+                match &message.role {
+                    Assistant => {
+                        // ai的最终回答用markdown来渲染一下，codex也是这样的
+                        let markdown_style = tui_markdown::Options::new(CustomMarkdownStyle);
+
+                        let markdown =
+                            tui_markdown::from_str_with_options(&message.content, &markdown_style);
+                        for (line_index, mut markdown_line) in
+                            markdown.lines.into_iter().enumerate()
+                        {
+                            let current_prefix = if line_index == 0 { "• " } else { "  " };
+                            markdown_line
+                                .spans
+                                .insert(0, Span::styled(current_prefix, prefix_style));
+
+                            lines.push(markdown_line);
+                        }
+                    }
+                    _ => {
+                        for (line_index, content) in message.content.split('\n').enumerate() {
+                            let current_prefix = if line_index == 0 { prefix } else { "  " };
+
+                            lines.push(Line::from(vec![
+                                Span::styled(current_prefix, prefix_style),
+                                Span::styled(content, content_style),
+                            ]));
+                        }
+                    }
+                }
+            }
+            lines.push(Line::default());
+        }
+        lines
+    }
 }
 
+/// 强制重绘，解决中文字符删除的时候会留下光标的问题(这真的是解决方法吗？)
 fn force_redraw_area(buffer: &mut Buffer, area: Rect) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {

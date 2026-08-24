@@ -92,6 +92,7 @@ impl Agent {
         request: CreateChatCompletionRequest,
     ) -> color_eyre::Result<()> {
         self.sender.send(Message::AgentMessage(Started)).await?;
+        // 这里要改成使用我们自己的回复类型来解析，因为openai api里面没有reasoning content
         let mut stream = self
             .client
             .chat()
