@@ -1,7 +1,9 @@
 use tokio::sync::mpsc;
 
 use crate::{
-    api::{ModelSetup, openai_compatible::OpenAICompatibleChunk}, tool::read_file::ReadFileTool, types::{
+    api::{ModelSetup, openai_compatible::OpenAICompatibleChunk},
+    tool::read_file::ReadFileTool,
+    types::{
         self,
         AgentEvent::{self, Delta, Done, Error, Started},
         ChoiceDelta::{OutputDelta, ReasoningDelta},
@@ -158,4 +160,6 @@ Guidelines:
         self.sender.send(Message::AgentMessage(Done)).await?;
         Ok(())
     }
+
+    pub async fn agent_loop() {}
 }

@@ -79,15 +79,13 @@ impl Tool for ReadFileTool {
 
 impl Into<ChatCompletionTools> for ReadFileTool {
     fn into(self) -> ChatCompletionTools {
-        ChatCompletionTools::Function(
-            ChatCompletionTool {
-                function: FunctionObject {
-                    name: self.name(),
-                    description: self.description(),
-                    parameters: self.parameters(),
-                    strict: Some(false),
-                },
-            }
-        )
+        ChatCompletionTools::Function(ChatCompletionTool {
+            function: FunctionObject {
+                name: self.name(),
+                description: self.description(),
+                parameters: self.parameters(),
+                strict: Some(false),
+            },
+        })
     }
 }

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_openai::types::admin::users::User;
 use color_eyre::Result;
 use crossterm::{
@@ -23,6 +25,8 @@ use crate::types::{
     Role::{self, Assistant, User as TuiUser},
     UserCommand,
 };
+
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 // markdown的样式配置
 #[derive(Clone)]
@@ -53,6 +57,8 @@ pub struct App<'a> {
     message_scroll: u16,
     message_max_scroll: u16,
     follow_tail: bool,
+    reasoning_expanded: bool,
+    spinner_frame: usize,
 }
 
 impl App<'_> {
@@ -70,14 +76,30 @@ impl App<'_> {
             message_scroll: 0,
             message_max_scroll: 0,
             follow_tail: false,
+            reasoning_expanded: false,
+            spinner_frame: 0,
         }
     }
 
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> color_eyre::Result<()> {
         self.running = true;
+
+        // thinking动画
+        let mut spinner_tick = tokio::time::interval(Duration::from_millis(50));
+        spinner_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;
             tokio::select! {
+
+                // 动画
+                _ = spinner_tick.tick() => {
+                    if self.current_assitant_index.is_some() {
+                        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+                    }
+                }
+
+
                 event = self.event_stream.next() => {
                 match event {
                     Some(Ok(Event::Key(key))) => {
@@ -150,6 +172,10 @@ impl App<'_> {
             }
             (KeyModifiers::SHIFT, KeyCode::Enter) => {
                 self.inputs.insert_newline();
+                Ok(())
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+                self.reasoning_expanded = !self.reasoning_expanded;
                 Ok(())
             }
             (_, KeyCode::Enter) => {
@@ -247,7 +273,7 @@ impl App<'_> {
     fn gen_main_lines(&self) -> Vec<Line<'_>> {
         let mut lines = Vec::default();
         // 每次都遍历所有可展示信息（对话长了之后，对性能影响很大）
-        for message in &self.display_message {
+        for (index, message) in self.display_message.iter().enumerate() {
             let (prefix, prefix_style, content_style, reasoning_style) = match message.role {
                 TuiUser => (
                     "› ",
@@ -268,8 +294,21 @@ impl App<'_> {
                     None,
                 ),
             };
+
+            let is_current = self.current_assitant_index == Some(index);
+            let is_thinking_animation =
+                matches!(message.role, Assistant) && is_current && message.content.is_empty();
+
+            if is_thinking_animation {
+                let frame = SPINNER_FRAMES[self.spinner_frame];
+                lines.push(Line::from(vec![Span::styled(
+                    format!("{frame} Thinking..."),
+                    Style::default().fg(Color::DarkGray).italic(),
+                )]))
+            }
+
             // 选渲染当前这条消息的 reasoning
-            if !message.reasoning_content.is_empty() {
+            if self.reasoning_expanded && !message.reasoning_content.is_empty() {
                 if let Some(reasoning_style) = reasoning_style {
                     for reasoning_line in message.reasoning_content.split('\n') {
                         lines.push(Line::from(vec![
