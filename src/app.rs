@@ -1,7 +1,9 @@
 use async_openai::types::admin::users::User;
 use color_eyre::Result;
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent}, execute, terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent},
+    execute,
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use futures::{FutureExt, StreamExt};
 use ratatui::{
@@ -112,20 +114,26 @@ impl App<'_> {
         // 生成需要渲染的line（以及填充格式）
         let lines = self.gen_main_lines();
 
-        let para_main = Paragraph::new(lines)
-            .wrap(Wrap { trim: false });
+        let para_main = Paragraph::new(lines).wrap(Wrap { trim: false });
 
         let area = trunks[0];
         let content_width = area.width.saturating_sub(2);
         let content_height = para_main.line_count(content_width);
         let viewport_height = area.height.saturating_sub(2) as usize;
 
-        let max_scorll = content_height.saturating_sub(viewport_height).min(u16::MAX as usize) as u16;
+        let max_scorll = content_height
+            .saturating_sub(viewport_height)
+            .min(u16::MAX as usize) as u16;
         let current_scoll = self.message_scroll.min(max_scorll);
-        let current_scoll = if self.follow_tail {max_scorll} else {current_scoll};
+        let current_scoll = if self.follow_tail {
+            max_scorll
+        } else {
+            current_scoll
+        };
 
-        let para_main = para_main.block(Block::bordered().title(title)).scroll((current_scoll,0));
-
+        let para_main = para_main
+            .block(Block::bordered().title(title))
+            .scroll((current_scoll, 0));
 
         frame.render_widget(para_main, trunks[0]);
         frame.render_widget(&self.inputs, trunks[1]);
@@ -168,20 +176,23 @@ impl App<'_> {
         }
     }
 
-    async fn on_mouse_event(&mut self,mouse_event:MouseEvent) -> Result<()> {
+    async fn on_mouse_event(&mut self, mouse_event: MouseEvent) -> Result<()> {
         // 一次滑动多少行
         let mouse_scorll_lines = 2;
 
         match mouse_event.kind {
             crossterm::event::MouseEventKind::ScrollDown => {
-                self.message_scroll = self.message_scroll.saturating_add(mouse_scorll_lines).min(self.message_max_scroll);
+                self.message_scroll = self
+                    .message_scroll
+                    .saturating_add(mouse_scorll_lines)
+                    .min(self.message_max_scroll);
                 self.follow_tail = self.message_scroll == self.message_max_scroll;
-            },
+            }
             crossterm::event::MouseEventKind::ScrollUp => {
                 self.message_scroll = self.message_scroll.saturating_sub(mouse_scorll_lines);
                 self.follow_tail = false;
-            },
-            _ => {},
+            }
+            _ => {}
         }
         Ok(())
     }

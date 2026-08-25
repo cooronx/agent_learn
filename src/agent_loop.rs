@@ -1,6 +1,7 @@
 use tokio::sync::mpsc;
 
-use crate::{ api::{ModelSetup, openai_compatible::OpenAICompatibleChunk}, types::{
+use crate::{
+    api::{ModelSetup, openai_compatible::OpenAICompatibleChunk}, tool::read_file::ReadFileTool, types::{
         self,
         AgentEvent::{self, Delta, Done, Error, Started},
         ChoiceDelta::{OutputDelta, ReasoningDelta},
@@ -9,9 +10,15 @@ use crate::{ api::{ModelSetup, openai_compatible::OpenAICompatibleChunk}, types:
     },
 };
 use async_openai::{
-    Client, config::OpenAIConfig, types::{
-        admin::users::User, chat::{
-            ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
+    Client,
+    config::OpenAIConfig,
+    types::{
+        admin::users::User,
+        chat::{
+            ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+            ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageArgs,
+            ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
+            CreateChatCompletionRequestArgs,
         },
     },
 };
@@ -41,25 +48,56 @@ impl Agent {
         }
     }
 
-    pub fn build_user_propmt(
-        &mut self,
-    ) -> color_eyre::Result<CreateChatCompletionRequest> {
+    pub fn build_user_propmt(&mut self) -> color_eyre::Result<CreateChatCompletionRequest> {
         let request = CreateChatCompletionRequestArgs::default()
             .model(&self.model_str)
             .messages(self.context.clone())
+            .tools([ReadFileTool::default().into()])
             .stream(true)
             .build()?;
         Ok(request)
     }
 
+    fn build_system_prompt(&self) -> color_eyre::Result<String> {
+        let system_prompt = format!(
+            r#"You are a coding agent belongs to cooronx, naming cooronx的超级简单coding agent.
+
+Current working directory: {}
+
+Use the available tools to inspect, modify, and work with the project.
+
+Guidelines:
+- Work within the current working directory.
+- Inspect relevant files before making changes.
+- Make the smallest changes necessary to complete the task.
+- Verify your changes when appropriate.
+- Keep your final response concise."#,
+            std::env::current_dir()?.display()
+        );
+        Ok(system_prompt)
+    }
+
     pub async fn run(mut self) -> color_eyre::Result<()> {
+        // 如果是空的，说明刚启动，要加入系统提示词
+        if self.context.is_empty() {
+            let prompt = self.build_system_prompt()?;
+            let prompt = ChatCompletionRequestSystemMessageArgs::default()
+                .content(prompt)
+                .build()?;
+            self.context.push(prompt.into());
+        }
         while let Some(message) = self.receiver.recv().await {
             match message {
                 Message::UserMessage(user_command) => match user_command {
                     UserCommand::Submit(msg) => {
                         let ret = async {
                             // 放入上下文中
-                            self.context.push(ChatCompletionRequestUserMessageArgs::default().content(msg).build()?.into());
+                            self.context.push(
+                                ChatCompletionRequestUserMessageArgs::default()
+                                    .content(msg)
+                                    .build()?
+                                    .into(),
+                            );
                             let req = self.build_user_propmt()?;
                             self.send_to_ai_with_stream(req).await
                         }
@@ -110,7 +148,13 @@ impl Agent {
                 }
             }
         }
-        self.context.push(ChatCompletionRequestAssistantMessageArgs::default().content(final_output).build()?.into());
+        // 加入上下文
+        self.context.push(
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content(final_output)
+                .build()?
+                .into(),
+        );
         self.sender.send(Message::AgentMessage(Done)).await?;
         Ok(())
     }
