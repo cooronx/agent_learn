@@ -1,8 +1,8 @@
 mod agent_loop;
+mod ai;
 mod api;
 mod app;
 mod tool;
-mod ai;
 mod types;
 use std::io::stdout;
 

@@ -4,12 +4,10 @@ use async_openai::Client;
 
 use color_eyre::{Result, eyre::Context};
 
-
 pub mod api;
+pub mod client;
 pub mod providers;
 pub mod types;
-pub mod client;
-
 
 pub struct ModelSetup {
     pub client: async_openai::Client<OpenAIConfig>,

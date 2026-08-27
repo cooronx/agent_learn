@@ -1,104 +1,105 @@
+use serde::{Deserialize, Serialize};
 
-use serde::{Serialize,Deserialize};
-
-use crate::ai::types::{AssistantMessage, Context, Model, ModelMessage, Role, SystemMessage, ToolCall, ToolCallResultMessage, ToolDefinition, UserMessage};
-
+use crate::ai::types::{
+    AssistantMessage, Context, Model, ModelMessage, Role, SystemMessage, ToolCall,
+    ToolCallResultMessage, ToolDefinition, UserMessage,
+};
 
 // ============== Request ===============
 
-#[derive(Debug,Serialize)]
+#[derive(Debug, Serialize)]
 pub struct OpenAIChatCompletionRequest {
     pub model: String,
-    pub messages: Vec<OpenAIMessage>,
+    pub messages: Vec<OpenAIChatCompletionMessage>,
 
-    #[serde(default,skip_serializing_if = "Vec::is_empty")]
-    pub tools : Vec<OpenAIFunctionToolDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<OpenAIFunctionToolDefinition>,
 
     pub stream: bool,
 
     #[serde(flatten)]
-    pub extra: serde_json::Map<String,serde_json::Value>,
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
-
 
 // ============ Message ================
 
-#[derive(Debug,Deserialize,Serialize)]
-pub struct OpenAIMessage {
+#[derive(Debug, Deserialize, Serialize)]
+pub struct OpenAIChatCompletionMessage {
     pub role: Role,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
 
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<OpenAIToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<OpenAIToolCall>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 
     #[serde(flatten)]
-    pub extra: serde_json::Map<String,serde_json::Value>,
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-impl From<&SystemMessage> for OpenAIMessage {
+impl From<&SystemMessage> for OpenAIChatCompletionMessage {
     fn from(value: &SystemMessage) -> Self {
         Self {
             role: Role::System,
             content: Some(value.content.clone()),
-            tool_calls: Vec::default(),
+            tool_calls: None,
             tool_call_id: None,
             extra: serde_json::Map::new(),
         }
     }
 }
 
-impl From<&UserMessage> for OpenAIMessage {
+impl From<&UserMessage> for OpenAIChatCompletionMessage {
     fn from(value: &UserMessage) -> Self {
         Self {
             role: Role::User,
             content: Some(value.content.clone()),
-            tool_calls: Vec::default(),
+            tool_calls: None,
             tool_call_id: None,
             extra: serde_json::Map::new(),
         }
     }
 }
 
-impl From<&AssistantMessage> for OpenAIMessage {
+impl From<&AssistantMessage> for OpenAIChatCompletionMessage {
     fn from(value: &AssistantMessage) -> Self {
         Self {
             role: Role::Assistant,
             content: value.content.clone(),
-            tool_calls: value.tool_calls.iter().map(OpenAIToolCall::from).collect(),
+            tool_calls: Some(value.tool_calls.iter().map(OpenAIToolCall::from).collect()),
             tool_call_id: None,
             extra: serde_json::Map::new(),
         }
     }
 }
 
-impl From<&ToolCallResultMessage> for OpenAIMessage {
+impl From<&ToolCallResultMessage> for OpenAIChatCompletionMessage {
     fn from(value: &ToolCallResultMessage) -> Self {
         Self {
             role: Role::Tool,
             content: Some(value.content.clone()),
-            tool_calls: Vec::default(),
+            tool_calls: None,
             tool_call_id: Some(value.tool_call_id.clone()),
             extra: serde_json::Map::new(),
         }
     }
 }
 
-impl From<&ModelMessage> for OpenAIMessage {
+impl From<&ModelMessage> for OpenAIChatCompletionMessage {
     fn from(value: &ModelMessage) -> Self {
         match value {
             ModelMessage::User(user_message) => Self::from(user_message),
             ModelMessage::Assistant(assistant_message) => Self::from(assistant_message),
-            ModelMessage::ToolResult(tool_call_result_message) => Self::from(tool_call_result_message),
+            ModelMessage::ToolResult(tool_call_result_message) => {
+                Self::from(tool_call_result_message)
+            }
             ModelMessage::System(system_message) => Self::from(system_message),
         }
     }
 }
-
 
 // ============== Tool ==================
 
@@ -111,10 +112,9 @@ impl From<&ModelMessage> for OpenAIMessage {
 //         "parameters": {}
 //      }
 // }
-// 
-#[derive(Debug,Serialize)]
+//
+#[derive(Debug, Serialize)]
 pub struct OpenAIFunctionToolDefinition {
-
     // 这里不能直接写type，因为type是rust的关键字，好家伙
     #[serde(rename = "type")]
     pub kind: String,
@@ -143,7 +143,7 @@ impl From<&ToolDefinition> for OpenAIFunctionToolDefinition {
 //       }
 // }
 
-#[derive(Debug,Deserialize,Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OpenAIToolCall {
     pub id: String,
 
@@ -153,51 +153,104 @@ pub struct OpenAIToolCall {
     pub function: OpenAIFunctionCall,
 }
 
-#[derive(Debug,Deserialize,Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OpenAIFunctionCall {
     pub name: String,
-    
+
     // openai 要求这里是字符串
     pub arguments: String,
 }
 
 impl From<&ToolCall> for OpenAIToolCall {
     fn from(value: &ToolCall) -> Self {
-        Self { 
+        Self {
             id: value.id.clone(),
             kind: "function".to_string(),
             function: OpenAIFunctionCall {
                 name: value.name.clone(),
                 arguments: value.arguments.to_string(),
-            }
+            },
         }
     }
 }
 
+// ======= response =======
+#[derive(Debug, Deserialize)]
+pub struct OpenAIChatCompletionResponse {
+    pub choices: Vec<OpenAIChatCompletionChoice>,
 
-// ======= method =======
-pub fn build_request(model: &Model, context: &Context, stream: bool, extra: serde_json::Map<String,serde_json::Value>) -> OpenAIChatCompletionRequest {
-
-    let mut messages = Vec::new();
-
-    messages.extend(context.messages.iter().map(OpenAIMessage::from));
-
-    let tools = context.tools.iter().map(OpenAIFunctionToolDefinition::from).collect();
-
-    OpenAIChatCompletionRequest { model: model.id.clone(), messages, tools, stream, extra }
+    // 暂时用不到的字段直接保留，后面用到的时候再来实现吧
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-// #[cfg(test)]
-// mod test {
-//     use crate::ai::ModelSetup;
+#[derive(Debug, Deserialize)]
+pub struct OpenAIChatCompletionChoice {
+    pub index: usize,
+    pub message: OpenAIChatCompletionMessage,
+    pub finish_reason: Option<String>,
 
-// use super::*;
+    // 暂时用不到的字段直接保留，后面用到的时候再来实现吧
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
 
-//     #[test]
-//     fn send_request() {
-//         dotenvy::dotenv().ok();
-//         let model_setup = ModelSetup::from_env().unwrap();
-//         // let req = build_request(model_setup, context, stream, extra)
-//     }
+// ======= method =======
+pub fn build_request(
+    model: &Model,
+    context: &Context,
+    stream: bool,
+    extra: serde_json::Map<String, serde_json::Value>,
+) -> OpenAIChatCompletionRequest {
+    let mut messages = Vec::new();
 
-// }
+    messages.extend(
+        context
+            .messages
+            .iter()
+            .map(OpenAIChatCompletionMessage::from),
+    );
+
+    let tools = context
+        .tools
+        .iter()
+        .map(OpenAIFunctionToolDefinition::from)
+        .collect();
+
+    OpenAIChatCompletionRequest {
+        model: model.id.clone(),
+        messages,
+        tools,
+        stream,
+        extra,
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::ai::{ModelSetup, client::OpenAIChatCompletionClient};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn send_request() {
+        dotenvy::dotenv().ok();
+        let client = OpenAIChatCompletionClient::from_env().unwrap();
+        let model = Model {
+            id: "deepseek-v4-flash".to_string(),
+            provider: "deepseek".to_string(),
+            api: "todo!()".to_string(),
+        };
+        let context = Context {
+            system_prompt: None,
+            messages: vec![ModelMessage::User(UserMessage {
+                content: "你好啊".to_string(),
+            })],
+            tools: Vec::new(),
+        };
+
+        let req = build_request(&model, &context, false, serde_json::Map::new());
+        let resp = client.complete(req).await.unwrap();
+        println!("{}",resp.choices[0].message.content.as_ref().unwrap());
+    }
+}
