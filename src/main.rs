@@ -6,7 +6,7 @@ mod ai;
 mod types;
 use std::io::stdout;
 
-use crate::{agent_loop::Agent, api::ModelSetup, app::App};
+use crate::{agent_loop::Agent, ai::ModelSetup, app::App};
 
 use color_eyre::Result;
 use crossterm::{

@@ -1,11 +1,9 @@
 use tokio::sync::mpsc;
 
 use crate::{
-    api::{ModelSetup, openai_compatible::OpenAICompatibleChunk},
-    tool::read_file::ReadFileTool,
-    types::{
+    ai::ModelSetup, api::openai_compatible::OpenAICompatibleChunk, tool::read_file::ReadFileTool, types::{
         self,
-        AgentEvent::{self, Delta, Done, Error, Started},
+        AgentEvent::{Delta, Done, Error, Started},
         ChoiceDelta::{OutputDelta, ReasoningDelta},
         Message::{self, AgentMessage},
         UserCommand,

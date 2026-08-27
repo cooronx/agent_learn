@@ -1,6 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 
+#[derive(Debug,Clone,Deserialize,Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
 
 #[derive(Debug,Clone)]
 pub struct Model {
@@ -11,11 +20,16 @@ pub struct Model {
 
 #[derive(Debug,Clone,Serialize,Deserialize)]
 pub enum ModelMessage {
+    System(SystemMessage),
     User(UserMessage),
     Assistant(AssistantMessage),
     ToolResult(ToolCallResultMessage)
 }
 
+#[derive(Debug,Clone,Serialize,Deserialize)]
+pub struct SystemMessage {
+    pub content: String,
+}
 
 #[derive(Debug,Clone,Serialize,Deserialize)]
 pub struct UserMessage {
@@ -26,8 +40,10 @@ pub struct UserMessage {
 #[derive(Debug,Clone,Serialize,Deserialize)]
 pub struct AssistantMessage {
     pub content: Option<String>,
-    pub reasoning_content: Option<String>,
-    pub tool_calls: Option<Vec<ToolCall>>
+    pub reasoning: Option<String>,
+
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Debug,Clone,Serialize,Deserialize)]
