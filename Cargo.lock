@@ -26,6 +26,7 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "dotenvy",
+ "eventsource-stream",
  "futures",
  "ratatui",
  "ratatui-textarea",

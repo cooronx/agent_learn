@@ -5,7 +5,7 @@ use crate::ai::types::{
     ToolCallResultMessage, ToolDefinition, UserMessage,
 };
 
-type ExtraMapType = serde_json::Map<String,serde_json::Value>;
+type ExtraMapType = serde_json::Map<String, serde_json::Value>;
 
 // ============== Request ===============
 
@@ -230,57 +230,55 @@ pub fn build_request(
 
 // ====== stream response =======
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct OpenAIChatCompletionStreamChunk {
-    pub choices: Vec<OpenAIChatCompletionChoice>,
+    pub choices: Vec<OpenAIChatCompletionStreamChoice>,
 
     #[serde(flatten)]
     pub extra: ExtraMapType,
 }
 
-
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct OpenAIChatCompletionStreamChoice {
     pub index: usize,
-    pub delta: Vec<OpenAIChatCompletionDelta>,
-    pub finish_reason: String,
+    pub delta: OpenAIChatCompletionDelta,
+    pub finish_reason: Option<String>,
 
     #[serde(flatten)]
     pub extra: ExtraMapType,
 }
 
-
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct OpenAIChatCompletionDelta {
     pub content: Option<String>,
-    pub role: Role,
+    pub role: Option<Role>,
     pub tool_calls: Option<Vec<OpenAIToolCallDelta>>,
 
     #[serde(flatten)]
     pub extra: ExtraMapType,
 }
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct OpenAIToolCallDelta {
     pub index: usize,
     pub id: Option<String>,
     pub function: Option<OpenAIFunctionCallDelta>,
-    
+
     #[serde(rename = "type")]
     pub kind: Option<String>,
 }
 
-
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct OpenAIFunctionCallDelta {
     pub name: Option<String>,
     pub arguments: Option<String>,
 }
 
-
 #[cfg(test)]
 mod test {
-    use crate::ai::{ModelSetup, client::OpenAIChatCompletionClient};
+    use futures::StreamExt;
+
+use crate::ai::{ModelSetup, client::OpenAIChatCompletionClient};
 
     use super::*;
 
@@ -301,8 +299,12 @@ mod test {
             tools: Vec::new(),
         };
 
-        let req = build_request(&model, &context, false, serde_json::Map::new());
-        let resp = client.complete(req).await.unwrap();
-        println!("{}",resp.choices[0].message.content.as_ref().unwrap());
+        let req = build_request(&model, &context, true, serde_json::Map::new());
+        let mut stream = client.stream(req).await.unwrap();
+        while let Some(chunk) = stream.next().await {
+            
+            let chunk = chunk.unwrap();
+            println!("{:?}",chunk.choices[0]);
+        }
     }
 }
