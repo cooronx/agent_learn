@@ -5,6 +5,8 @@ use crate::ai::types::{
     ToolCallResultMessage, ToolDefinition, UserMessage,
 };
 
+type ExtraMapType = serde_json::Map<String,serde_json::Value>;
+
 // ============== Request ===============
 
 #[derive(Debug, Serialize)]
@@ -18,7 +20,7 @@ pub struct OpenAIChatCompletionRequest {
     pub stream: bool,
 
     #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub extra: ExtraMapType,
 }
 
 // ============ Message ================
@@ -37,7 +39,7 @@ pub struct OpenAIChatCompletionMessage {
     pub tool_call_id: Option<String>,
 
     #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub extra: ExtraMapType,
 }
 
 impl From<&SystemMessage> for OpenAIChatCompletionMessage {
@@ -181,7 +183,7 @@ pub struct OpenAIChatCompletionResponse {
 
     // 暂时用不到的字段直接保留，后面用到的时候再来实现吧
     #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub extra: ExtraMapType,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,7 +194,7 @@ pub struct OpenAIChatCompletionChoice {
 
     // 暂时用不到的字段直接保留，后面用到的时候再来实现吧
     #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub extra: ExtraMapType,
 }
 
 // ======= method =======
@@ -225,6 +227,56 @@ pub fn build_request(
         extra,
     }
 }
+
+// ====== stream response =======
+
+#[derive(Debug,Deserialize)]
+pub struct OpenAIChatCompletionStreamChunk {
+    pub choices: Vec<OpenAIChatCompletionChoice>,
+
+    #[serde(flatten)]
+    pub extra: ExtraMapType,
+}
+
+
+#[derive(Debug,Deserialize)]
+pub struct OpenAIChatCompletionStreamChoice {
+    pub index: usize,
+    pub delta: Vec<OpenAIChatCompletionDelta>,
+    pub finish_reason: String,
+
+    #[serde(flatten)]
+    pub extra: ExtraMapType,
+}
+
+
+#[derive(Debug,Deserialize)]
+pub struct OpenAIChatCompletionDelta {
+    pub content: Option<String>,
+    pub role: Role,
+    pub tool_calls: Option<Vec<OpenAIToolCallDelta>>,
+
+    #[serde(flatten)]
+    pub extra: ExtraMapType,
+}
+
+#[derive(Debug,Deserialize)]
+pub struct OpenAIToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub function: Option<OpenAIFunctionCallDelta>,
+    
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+}
+
+
+#[derive(Debug,Deserialize)]
+pub struct OpenAIFunctionCallDelta {
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+}
+
 
 #[cfg(test)]
 mod test {
