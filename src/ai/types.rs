@@ -60,7 +60,7 @@ pub struct ToolCall {
 pub struct ToolDefinition {
     pub name: String,
     pub description: Option<String>,
-    pub parameters: serde_json::Value,
+    pub parameters: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]
