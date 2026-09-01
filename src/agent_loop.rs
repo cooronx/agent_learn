@@ -174,14 +174,15 @@ Guidelines:
             let assistant_msg = ModelMessage::Assistant(AssistantMessage {
                 content: Some(final_output),
                 reasoning: Some(reasoning_output),
-                tool_calls: Some(tool_calls.clone()),
+                tool_calls: if tool_calls.is_empty() {None} else {Some(tool_calls.clone())},
             });
+
+            self.context.messages.push(assistant_msg);
 
             if tool_calls.is_empty() {
                 break;
             }
 
-            self.context.messages.push(assistant_msg);
 
             // 执行toolcall
             for tool_call in tool_calls {

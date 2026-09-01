@@ -68,6 +68,14 @@ impl From<&UserMessage> for OpenAIChatCompletionMessage {
 
 impl From<&AssistantMessage> for OpenAIChatCompletionMessage {
     fn from(value: &AssistantMessage) -> Self {
+
+        let mut extra = serde_json::Map::new();
+
+        // deepseek要求每次都要传入思维链
+        if let Some(reasoning) = &value.reasoning {
+            extra.insert("reasoning_content".to_string(), serde_json::Value::String(reasoning.clone()));
+        }
+
         Self {
             role: Role::Assistant,
             content: value.content.clone(),
@@ -76,7 +84,7 @@ impl From<&AssistantMessage> for OpenAIChatCompletionMessage {
                 .as_ref()
                 .map(|calls| calls.iter().map(OpenAIToolCall::from).collect()),
             tool_call_id: None,
-            extra: serde_json::Map::new(),
+            extra,
         }
     }
 }
