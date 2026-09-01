@@ -77,12 +77,8 @@ impl Tool for ReadFileTool {
     }
 }
 
-impl Into<ToolDefinition> for ReadFileTool {
-    fn into(self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name(),
-            description: self.description(),
-            parameters: self.parameters(),
-        }
+impl From<ToolDefinition> for ReadFileTool {
+    fn from(_: ToolDefinition) -> Self {
+        Self::default()
     }
 }
