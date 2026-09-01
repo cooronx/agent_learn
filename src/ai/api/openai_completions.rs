@@ -71,7 +71,10 @@ impl From<&AssistantMessage> for OpenAIChatCompletionMessage {
         Self {
             role: Role::Assistant,
             content: value.content.clone(),
-            tool_calls: Some(value.tool_calls.iter().map(OpenAIToolCall::from).collect()),
+            tool_calls: value
+                .tool_calls
+                .as_ref()
+                .map(|calls| calls.iter().map(OpenAIToolCall::from).collect()),
             tool_call_id: None,
             extra: serde_json::Map::new(),
         }
@@ -278,7 +281,7 @@ pub struct OpenAIFunctionCallDelta {
 mod test {
     use futures::StreamExt;
 
-use crate::ai::{ModelSetup, client::OpenAIChatCompletionClient};
+    use crate::ai::client::OpenAIChatCompletionClient;
 
     use super::*;
 
@@ -292,7 +295,6 @@ use crate::ai::{ModelSetup, client::OpenAIChatCompletionClient};
             api: "todo!()".to_string(),
         };
         let context = Context {
-            system_prompt: None,
             messages: vec![ModelMessage::User(UserMessage {
                 content: "你好啊".to_string(),
             })],
@@ -302,9 +304,8 @@ use crate::ai::{ModelSetup, client::OpenAIChatCompletionClient};
         let req = build_request(&model, &context, true, serde_json::Map::new());
         let mut stream = client.stream(req).await.unwrap();
         while let Some(chunk) = stream.next().await {
-            
             let chunk = chunk.unwrap();
-            println!("{:?}",chunk.choices[0]);
+            println!("{:?}", chunk.choices[0]);
         }
     }
 }

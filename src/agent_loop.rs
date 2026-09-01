@@ -1,9 +1,12 @@
 use tokio::sync::mpsc;
 
 use crate::{
-    ai::ModelSetup,
-    api::openai_compatible::OpenAICompatibleChunk,
-    tool::read_file::ReadFileTool,
+    ai::{
+        self,
+        providers::Provider,
+        types::{AssistantMessage, ModelMessage, SystemMessage, UserMessage},
+    },
+    config::AgentConfig,
     types::{
         self,
         AgentEvent::{Delta, Done, Error, Started},
@@ -12,53 +15,30 @@ use crate::{
         UserCommand,
     },
 };
-use async_openai::{
-    Client,
-    config::OpenAIConfig,
-    types::{
-        admin::users::User,
-        chat::{
-            ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-            ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageArgs,
-            ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
-            CreateChatCompletionRequestArgs,
-        },
-    },
-};
 use futures::{SinkExt, StreamExt};
 
-#[derive(Debug)]
 pub struct Agent {
-    client: async_openai::Client<OpenAIConfig>,
-    model_str: String,
+    provider: Box<dyn Provider>,
+    config: AgentConfig,
     sender: mpsc::Sender<types::Message>,
     receiver: mpsc::Receiver<Message>,
-    context: Vec<ChatCompletionRequestMessage>,
+    context: ai::types::Context,
 }
 
 impl Agent {
     pub fn new(
-        setup: ModelSetup,
+        provider: Box<dyn Provider>,
+        config: AgentConfig,
         sender: mpsc::Sender<Message>,
         receiver: mpsc::Receiver<Message>,
     ) -> Self {
         Self {
-            client: setup.client,
-            model_str: setup.model,
+            provider,
+            config,
             sender,
             receiver,
-            context: Vec::default(),
+            context: ai::types::Context::default(),
         }
-    }
-
-    pub fn build_user_propmt(&mut self) -> color_eyre::Result<CreateChatCompletionRequest> {
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(&self.model_str)
-            .messages(self.context.clone())
-            .tools([ReadFileTool::default().into()])
-            .stream(true)
-            .build()?;
-        Ok(request)
     }
 
     fn build_system_prompt(&self) -> color_eyre::Result<String> {
@@ -82,27 +62,19 @@ Guidelines:
 
     pub async fn run(mut self) -> color_eyre::Result<()> {
         // 如果是空的，说明刚启动，要加入系统提示词
-        if self.context.is_empty() {
+        if self.context.messages.is_empty() {
             let prompt = self.build_system_prompt()?;
-            let prompt = ChatCompletionRequestSystemMessageArgs::default()
-                .content(prompt)
-                .build()?;
-            self.context.push(prompt.into());
+            let prompt = ModelMessage::System(SystemMessage { content: prompt });
+            self.context.messages.push(prompt);
         }
         while let Some(message) = self.receiver.recv().await {
             match message {
                 Message::UserMessage(user_command) => match user_command {
                     UserCommand::Submit(msg) => {
                         let ret = async {
-                            // 放入上下文中
-                            self.context.push(
-                                ChatCompletionRequestUserMessageArgs::default()
-                                    .content(msg)
-                                    .build()?
-                                    .into(),
-                            );
-                            let req = self.build_user_propmt()?;
-                            self.send_to_ai_with_stream(req).await
+                            let user_msg = ModelMessage::User(UserMessage { content: msg });
+                            self.context.messages.push(user_msg);
+                            self.send_to_ai_with_stream().await
                         }
                         .await;
                         // 错误信息也一并发过去展示
@@ -122,45 +94,34 @@ Guidelines:
         Ok(())
     }
 
-    pub async fn send_to_ai_with_stream(
-        &mut self,
-        request: CreateChatCompletionRequest,
-    ) -> color_eyre::Result<()> {
+    pub async fn send_to_ai_with_stream(&mut self) -> color_eyre::Result<()> {
         self.sender.send(Message::AgentMessage(Started)).await?;
         // 这里要改成使用我们自己的回复类型来解析，因为openai api里面没有reasoning content
-        let mut stream = self
-            .client
-            .chat()
-            .create_stream_byot::<_, OpenAICompatibleChunk>(request)
-            .await?;
+        let mut stream = self.provider.stream(&self.context).await?;
+        let mut reasoning_output = String::default();
         let mut final_output = String::default();
         while let Some(result) = stream.next().await {
             let resp = result?;
-            if let Some(choice) = resp.choices.first() {
-                // 推理过程
-                if let Some(reasoning_content) = &choice.delta.reasoning_content {
-                    let reasoning_content =
-                        AgentMessage(Delta(ReasoningDelta(reasoning_content.clone())));
-                    self.sender.send(reasoning_content).await?;
-                }
-
-                if let Some(content) = &choice.delta.base.content {
-                    final_output.push_str(content);
-                    let output_content = AgentMessage(Delta(OutputDelta(content.clone())));
-                    self.sender.send(output_content).await?;
-                }
+            if let Some(reasoning_content) = resp.reasoning {
+                reasoning_output.push_str(&reasoning_content);
+                let reasoning_content =
+                    AgentMessage(Delta(ReasoningDelta(reasoning_content.clone())));
+                self.sender.send(reasoning_content).await?;
+            }
+            if let Some(content) = resp.content {
+                final_output.push_str(&content);
+                let output_content = AgentMessage(Delta(OutputDelta(content.clone())));
+                self.sender.send(output_content).await?;
             }
         }
         // 加入上下文
-        self.context.push(
-            ChatCompletionRequestAssistantMessageArgs::default()
-                .content(final_output)
-                .build()?
-                .into(),
-        );
+        let assistant_msg = ModelMessage::Assistant(AssistantMessage {
+            content: Some(final_output),
+            reasoning: Some(reasoning_output),
+            tool_calls: None,
+        });
+        self.context.messages.push(assistant_msg);
         self.sender.send(Message::AgentMessage(Done)).await?;
         Ok(())
     }
-
-    pub async fn agent_loop() {}
 }

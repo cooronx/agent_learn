@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use async_openai::types::admin::users::User;
 use color_eyre::Result;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent},

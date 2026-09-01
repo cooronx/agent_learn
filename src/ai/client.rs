@@ -96,7 +96,7 @@ impl OpenAIChatCompletionClient {
         let stream = response
             .bytes_stream()
             .eventsource()
-            .take_while(|event|{
+            .take_while(|event| {
                 ready(match event {
                     Ok(event) => event.data.trim() != "[DONE]",
                     Err(_) => true,
@@ -106,15 +106,18 @@ impl OpenAIChatCompletionClient {
                 match event {
                     Ok(event) if event.data.trim().is_empty() => None,
                     Ok(event) => {
-                        let ret = serde_json::from_str::<OpenAIChatCompletionStreamChunk>(&event.data)
-                            .map_err(|error| {
-                                eyre!("failed to deserialize chunk: {}, data: {}",error,event.data)
-                            });
+                        let ret =
+                            serde_json::from_str::<OpenAIChatCompletionStreamChunk>(&event.data)
+                                .map_err(|error| {
+                                    eyre!(
+                                        "failed to deserialize chunk: {}, data: {}",
+                                        error,
+                                        event.data
+                                    )
+                                });
                         Some(ret)
                     }
-                    Err(error) => {
-                        Some(Err(eyre!("failed to read SSE event: {}",error)))
-                    },
+                    Err(error) => Some(Err(eyre!("failed to read SSE event: {}", error))),
                 }
             })
             .boxed();

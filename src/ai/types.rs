@@ -39,8 +39,8 @@ pub struct AssistantMessage {
     pub content: Option<String>,
     pub reasoning: Option<String>,
 
-    #[serde(default)]
-    pub tool_calls: Vec<ToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,9 +63,23 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Context {
-    pub system_prompt: Option<String>,
     pub messages: Vec<ModelMessage>,
     pub tools: Vec<ToolDefinition>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AssistantDelta {
+    pub content: Option<String>,
+    pub reasoning: Option<String>,
+    pub tool_calls: Vec<ToolCallDelta>,
 }
