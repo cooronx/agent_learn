@@ -206,7 +206,7 @@ Guidelines:
         Ok(())
     }
 
-    fn register_tool<T: Tool + 'static>(&mut self, tool: T) {
+    fn register_tool<T: Tool>(&mut self, tool: T) {
         let defin = ToolDefinition {
             name: tool.name(),
             description: tool.description(),
