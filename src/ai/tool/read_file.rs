@@ -64,7 +64,7 @@ impl Tool for ReadFileTool {
             .ok_or_else(||eyre!("missing parameter: offset"))?;
         let max_lines =
             usize::try_from(self.limit).map_err(|_| eyre!("max_lines cannot be negative"))?;
-        let requested_lines = match args.get("lines") {
+        let requested_lines = match args.get("limit") {
             Some(value) => value
                 .as_u64()
                 .ok_or_else(|| eyre!("parameter lines must be a positive integer"))?
