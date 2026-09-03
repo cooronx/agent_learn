@@ -4,6 +4,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::ai::{tool::Tool, types::ToolDefinition};
 
+
+/// 读取文件（只支持文本文件）
+/// 可以限制一次最多读取多少行
+/// 支持偏移读取（还未实现）
 pub struct ReadFileTool {
     pub max_lines: i32,
 }

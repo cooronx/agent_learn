@@ -8,7 +8,7 @@ use crate::{
     ai::{
         self,
         providers::Provider,
-        tool::{Tool, read_file::ReadFileTool},
+        tool::{Tool, read_file::ReadFileTool,list::ListTool},
         types::{
             AssistantMessage, ModelMessage, SystemMessage, ToolCall, ToolCallDelta,
             ToolCallResultMessage, ToolDefinition, UserMessage,
@@ -79,6 +79,7 @@ Guidelines:
             self.context.messages.push(prompt);
             // 工具定义
             self.register_tool(ReadFileTool::default());
+            self.register_tool(ListTool::default());
         }
         while let Some(message) = self.receiver.recv().await {
             match message {
