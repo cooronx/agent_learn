@@ -6,21 +6,12 @@ use tokio::sync::mpsc;
 
 use crate::{
     ai::{
-        self,
-        providers::Provider,
-        tool::{Tool, read_file::ReadFileTool,list::ListTool},
-        types::{
+        self, providers::Provider, tool::{Tool, list::ListTool, read_file::ReadFileTool}, types::{
             AssistantMessage, ModelMessage, SystemMessage, ToolCall, ToolCallDelta,
             ToolCallResultMessage, ToolDefinition, UserMessage,
         },
-    },
-    config::AgentConfig,
-    types::{
-        self,
-        AgentEvent::{Delta, Done, Error, Started},
-        ChoiceDelta::{OutputDelta, ReasoningDelta},
-        Message::{self, AgentMessage},
-        UserCommand,
+    }, config::AgentConfig, types::{
+        self, AgentEvent::{Delta, Done, Error, Started}, ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent}, Message::{self, AgentMessage}, UserCommand,
     },
 };
 use futures::{SinkExt, StreamExt};
@@ -134,6 +125,13 @@ Guidelines:
                 }
                 // 工具调用(按照index流式拼接起来)
                 for delta in resp.tool_calls {
+                    // chunk1: {"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"read_file","arguments":""}}]}
+                    //         ->
+                    // chunk2: {"tool_calls":[{"index":0,"function":{"arguments":"{"path":""}}]}
+                    //         ->
+                    // chunk3: {"tool_calls":[{"index":0,"function":{"arguments":"src/main.rs"}}]}
+                    //         ->
+                    // chunk4: {"tool_calls":[{"index":0,"function":{"arguments":""}"}}]}
                     while pending_calls.len() <= delta.index {
                         // 如果没有，那就先创建
                         pending_calls.push(ToolCallDelta {
@@ -144,6 +142,16 @@ Guidelines:
                         });
                     }
                     let current_delta = &mut pending_calls[delta.index];
+
+
+                    // 不能默认第一个sse chunk是有name和id的
+                    if delta.name.is_some() {
+                        current_delta.name = delta.name;
+                    }
+
+                    if delta.id.is_some() {
+                        current_delta.id = delta.id;
+                    }
 
                     if let Some(frag) = delta.arguments {
                         current_delta
@@ -187,6 +195,9 @@ Guidelines:
 
             // 执行toolcall
             for tool_call in tool_calls {
+                // 发送工具调用给tui界面
+                let tool_call_content = AgentMessage(Delta(ToolCallContent(format!("{} {}",tool_call.name,tool_call.arguments))));
+                self.sender.send(tool_call_content).await?;
                 let content = match self.execute_tool_call(&tool_call).await {
                     Ok(output) => output,
                     Err(err) => {

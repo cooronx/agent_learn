@@ -42,6 +42,7 @@ struct DisplayMessage {
     role: Role,
     reasoning_content: String,
     content: String,
+    tool_call_content: String,
 }
 
 #[derive(Debug)]
@@ -184,6 +185,7 @@ impl App<'_> {
                     role: TuiUser,
                     content: msg.clone(),
                     reasoning_content: String::default(),
+                    tool_call_content: String::default(),
                 });
                 self.message_sender
                     .send(Message::UserMessage(UserCommand::Submit(msg)))
@@ -232,6 +234,7 @@ impl App<'_> {
                         role: Assistant,
                         content: String::default(),
                         reasoning_content: String::default(),
+                        tool_call_content: String::default(),
                     });
                 }
                 crate::types::AgentEvent::Delta(s) => {
@@ -243,6 +246,12 @@ impl App<'_> {
                                 }
                                 crate::types::ChoiceDelta::ReasoningDelta(reasoning_str) => {
                                     display_str.reasoning_content.push_str(&reasoning_str);
+                                }
+                                crate::types::ChoiceDelta::ToolCallContent(tool_call_str) => {
+                                    if !display_str.tool_call_content.is_empty() {
+                                        display_str.tool_call_content.push_str("\n");
+                                    }
+                                    display_str.tool_call_content.push_str(&tool_call_str);
                                 }
                             };
                         }
@@ -322,6 +331,20 @@ impl App<'_> {
                     }
                 }
             }
+
+            // 渲染工具调用
+            if !message.tool_call_content.is_empty() {
+                let tool_style = Style::default().fg(Color::Yellow).italic();
+
+                for call in message.tool_call_content.split('\n') {
+                    lines.push(Line::from(vec![
+                        Span::styled("👀 ", tool_style),
+                        Span::styled(call, tool_style),
+                    ]));
+                }
+                lines.push(Line::default());
+            }
+
             // 再渲染output
             if !message.content.is_empty() {
                 match &message.role {
