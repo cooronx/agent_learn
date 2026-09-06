@@ -49,6 +49,7 @@ impl Tool for ListTool {
                 items.push(format!("{}",item.file_name().to_string_lossy()));
             }
         }
+        items.sort();
         let ret = items.join("\n");
 
         Ok(ret)

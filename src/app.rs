@@ -76,6 +76,7 @@ impl App<'_> {
             message_scroll: 0,
             message_max_scroll: 0,
             follow_tail: false,
+            // 2026.09.03 暂时一直设置为false，codex也没有展示给用户看思考过程，所以我们也没有必要
             reasoning_expanded: false,
             spinner_frame: 0,
         }
@@ -175,7 +176,7 @@ impl App<'_> {
                 Ok(())
             }
             (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-                self.reasoning_expanded = !self.reasoning_expanded;
+                // self.reasoning_expanded = !self.reasoning_expanded;
                 Ok(())
             }
             (_, KeyCode::Enter) => {
