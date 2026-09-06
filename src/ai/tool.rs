@@ -1,5 +1,6 @@
 pub mod read_file;
 pub mod list;
+pub mod bash_command;
 
 use async_trait::async_trait;
 

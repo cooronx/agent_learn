@@ -1,11 +1,19 @@
 use async_trait::async_trait;
 use color_eyre::eyre::eyre;
+use schemars::{JsonSchema, schema_for};
+use serde::Deserialize;
 
 use crate::ai::tool::Tool;
 
 
 #[derive(Default)]
 pub struct ListTool {}
+
+#[derive(JsonSchema,Deserialize)]
+pub struct ListToolParameters {
+    #[schemars(description = "The Directory to list, use . to represent current working directory")]
+    path: String,
+}
 
 #[async_trait]
 impl Tool for ListTool {
@@ -22,22 +30,13 @@ impl Tool for ListTool {
     }
 
     fn parameters(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "The Directory to list, use . to represent current working directory"
-                },
-            },
-            "required": ["path"]
-        }))
+        Some(schema_for!(ListToolParameters).to_value())
     }
 
     async fn execute(&self, args: serde_json::Value) -> color_eyre::Result<String> {
-        let path = args["path"]
-            .as_str()
-            .ok_or_else(||eyre!("missing parameter: path"))?;
+        let paras : ListToolParameters = serde_json::from_value(args)?;
+
+        let path = &paras.path;
 
         let mut items = Vec::new();
         let path = std::path::Path::new(path);
