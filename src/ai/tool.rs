@@ -1,3 +1,4 @@
+pub mod write;
 pub mod bash_command;
 pub mod list;
 pub mod read_file;

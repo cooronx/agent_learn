@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     ai::{
-        self, providers::Provider, tool::{Tool, bash_command::BashCommandTool, list::ListTool, read_file::ReadFileTool}, types::{
+        self, providers::Provider, tool::{Tool, bash_command::BashCommandTool, list::ListTool, read_file::ReadFileTool, write::WriteTool}, types::{
             AssistantMessage, ModelMessage, SystemMessage, ToolCall, ToolCallDelta,
             ToolCallResultMessage, ToolDefinition, UserMessage,
         },
@@ -76,6 +76,7 @@ Guidelines:
             self.register_tool(ReadFileTool::default());
             self.register_tool(ListTool::default());
             self.register_tool(BashCommandTool::default());
+            self.register_tool(WriteTool::default());
         }
         while let Some(message) = self.receiver.recv().await {
             match message {
