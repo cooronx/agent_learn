@@ -6,12 +6,21 @@ use tokio::sync::mpsc;
 
 use crate::{
     ai::{
-        self, providers::Provider, tool::{Tool, list::ListTool, read_file::ReadFileTool}, types::{
+        self,
+        providers::Provider,
+        tool::{Tool, list::ListTool, read_file::ReadFileTool},
+        types::{
             AssistantMessage, ModelMessage, SystemMessage, ToolCall, ToolCallDelta,
             ToolCallResultMessage, ToolDefinition, UserMessage,
         },
-    }, config::AgentConfig, types::{
-        self, AgentEvent::{Delta, Done, Error, Started}, ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent}, Message::{self, AgentMessage}, UserCommand,
+    },
+    config::AgentConfig,
+    types::{
+        self,
+        AgentEvent::{Delta, Done, Error, Started},
+        ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent},
+        Message::{self, AgentMessage},
+        UserCommand,
     },
 };
 use futures::{SinkExt, StreamExt};
@@ -143,7 +152,6 @@ Guidelines:
                     }
                     let current_delta = &mut pending_calls[delta.index];
 
-
                     // 不能默认第一个sse chunk是有name和id的
                     if delta.name.is_some() {
                         current_delta.name = delta.name;
@@ -183,7 +191,11 @@ Guidelines:
             let assistant_msg = ModelMessage::Assistant(AssistantMessage {
                 content: Some(final_output),
                 reasoning: Some(reasoning_output),
-                tool_calls: if tool_calls.is_empty() {None} else {Some(tool_calls.clone())},
+                tool_calls: if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls.clone())
+                },
             });
 
             self.context.messages.push(assistant_msg);
@@ -192,11 +204,13 @@ Guidelines:
                 break;
             }
 
-
             // 执行toolcall
             for tool_call in tool_calls {
                 // 发送工具调用给tui界面
-                let tool_call_content = AgentMessage(Delta(ToolCallContent(format!("{} {}",tool_call.name,tool_call.arguments))));
+                let tool_call_content = AgentMessage(Delta(ToolCallContent(format!(
+                    "{} {}",
+                    tool_call.name, tool_call.arguments
+                ))));
                 self.sender.send(tool_call_content).await?;
                 let content = match self.execute_tool_call(&tool_call).await {
                     Ok(output) => output,
@@ -211,7 +225,6 @@ Guidelines:
                         content,
                     }));
             }
-            
         }
 
         self.sender.send(Message::AgentMessage(Done)).await?;

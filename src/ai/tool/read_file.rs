@@ -2,10 +2,9 @@ use async_trait::async_trait;
 use color_eyre::{Result, eyre::eyre};
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
-use tokio::{io::{AsyncBufReadExt, BufReader}};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::ai::{tool::Tool, types::ToolDefinition};
-
 
 /// 读取文件（只支持文本文件）
 /// 可以限制一次最多读取多少行
@@ -14,14 +13,19 @@ pub struct ReadFileTool {
     pub limit: u64,
 }
 
-
-#[derive(JsonSchema,Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 pub struct ReadFileToolParameters {
     #[schemars(description = "The path of the file, e.g. /home/cooronx/test.sh")]
     path: String,
-    #[schemars(range(min = 0), description = "Which line to start read, the index starts at 0 (default 0)")]
+    #[schemars(
+        range(min = 0),
+        description = "Which line to start read, the index starts at 0 (default 0)"
+    )]
     offset: Option<u64>,
-    #[schemars(range(min = 1), description = "Maximum rows returned per request. Defaults to 1,000")]
+    #[schemars(
+        range(min = 1),
+        description = "Maximum rows returned per request. Defaults to 1,000"
+    )]
     limit: Option<u64>,
 }
 
@@ -48,8 +52,7 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<String> {
-
-        let paras:ReadFileToolParameters = serde_json::from_value(args)?;
+        let paras: ReadFileToolParameters = serde_json::from_value(args)?;
 
         let path = paras.path;
 

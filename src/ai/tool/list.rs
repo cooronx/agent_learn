@@ -5,19 +5,19 @@ use serde::Deserialize;
 
 use crate::ai::tool::Tool;
 
-
 #[derive(Default)]
 pub struct ListTool {}
 
-#[derive(JsonSchema,Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 pub struct ListToolParameters {
-    #[schemars(description = "The Directory to list, use . to represent current working directory")]
+    #[schemars(
+        description = "The Directory to list, use . to represent current working directory"
+    )]
     path: String,
 }
 
 #[async_trait]
 impl Tool for ListTool {
-    
     fn name(&self) -> String {
         "ls".to_string()
     }
@@ -34,7 +34,7 @@ impl Tool for ListTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> color_eyre::Result<String> {
-        let paras : ListToolParameters = serde_json::from_value(args)?;
+        let paras: ListToolParameters = serde_json::from_value(args)?;
 
         let path = &paras.path;
 
@@ -43,9 +43,9 @@ impl Tool for ListTool {
         for item in std::fs::read_dir(path)? {
             let item = item?;
             if item.metadata()?.is_dir() {
-                items.push(format!("{}/",item.file_name().to_string_lossy()));
+                items.push(format!("{}/", item.file_name().to_string_lossy()));
             } else {
-                items.push(format!("{}",item.file_name().to_string_lossy()));
+                items.push(format!("{}", item.file_name().to_string_lossy()));
             }
         }
         items.sort();
@@ -54,7 +54,6 @@ impl Tool for ListTool {
         Ok(ret)
     }
 }
-
 
 #[cfg(test)]
 mod test {
@@ -66,9 +65,9 @@ mod test {
         for item in std::fs::read_dir(path)? {
             let item = item?;
             if item.metadata()?.is_dir() {
-                println!("{}/",item.file_name().to_string_lossy())
+                println!("{}/", item.file_name().to_string_lossy())
             } else {
-                println!("{}",item.file_name().to_string_lossy())
+                println!("{}", item.file_name().to_string_lossy())
             }
         }
         Ok(())

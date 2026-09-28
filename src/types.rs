@@ -14,7 +14,7 @@ pub enum Message {
 pub enum ChoiceDelta {
     OutputDelta(String),
     ReasoningDelta(String),
-    ToolCallContent(String)
+    ToolCallContent(String),
 }
 
 #[derive(Debug)]
