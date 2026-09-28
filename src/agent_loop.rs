@@ -6,16 +6,11 @@ use tokio::sync::mpsc;
 
 use crate::{
     ai::{
-        self,
-        providers::Provider,
-        tool::{Tool, list::ListTool, read_file::ReadFileTool},
-        types::{
+        self, providers::Provider, tool::{Tool, bash_command::BashCommandTool, list::ListTool, read_file::ReadFileTool}, types::{
             AssistantMessage, ModelMessage, SystemMessage, ToolCall, ToolCallDelta,
             ToolCallResultMessage, ToolDefinition, UserMessage,
         },
-    },
-    config::AgentConfig,
-    types::{
+    }, config::AgentConfig, types::{
         self,
         AgentEvent::{Delta, Done, Error, Started},
         ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent},
@@ -77,9 +72,10 @@ Guidelines:
             let prompt = self.build_system_prompt()?;
             let prompt = ModelMessage::System(SystemMessage { content: prompt });
             self.context.messages.push(prompt);
-            // 工具定义
+            // 工具定义(要加入新的工具在这里添加就行了,吧，应该)
             self.register_tool(ReadFileTool::default());
             self.register_tool(ListTool::default());
+            self.register_tool(BashCommandTool::default());
         }
         while let Some(message) = self.receiver.recv().await {
             match message {
