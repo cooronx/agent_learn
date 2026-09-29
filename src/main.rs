@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     let client = OpenAIChatCompletionClient::from_env()?;
     let provider: Box<dyn Provider> = Box::new(DeepSeekProvider::new(client, "deepseek-v4-flash"));
     let config = AgentConfigBuilder::default()
-        .model("deepseek-v4-flash")
+        .model("deepseek-v4.1-flash")
         .build()?;
     let agent = Agent::new(provider, config, agent_msg_sender.clone(), user_msg_recv);
     let task = tokio::spawn(agent.run());
