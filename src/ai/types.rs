@@ -82,4 +82,16 @@ pub struct AssistantDelta {
     pub content: Option<String>,
     pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCallDelta>,
+    pub usage: Option<Usage>,
+}
+
+// token统计
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Usage {
+    // 输入token数（这个才是上下文的token数，这个相当于一次请求中发给ai的token数）
+    pub prompt_tokens: u64,
+    // 本次生成的token数
+    pub completion_tokens: u64,
+    // 输入 + 生成累积的token数
+    pub total_tokens: u64,
 }

@@ -35,6 +35,7 @@ pub struct Agent {
     receiver: mpsc::Receiver<Message>,
     context: ai::types::Context,
     tools: HashMap<String, Box<dyn Tool>>,
+    last_prompt_tokens: u64,
 }
 
 impl Agent {
@@ -51,6 +52,7 @@ impl Agent {
             receiver,
             context: ai::types::Context::default(),
             tools: HashMap::new(),
+            last_prompt_tokens: 0,
         }
     }
 
@@ -173,6 +175,11 @@ Guidelines:
                             .get_or_insert_default()
                             .push_str(&frag);
                     }
+                }
+
+                // 记录一下token数量
+                if let Some(usage) = resp.usage {
+                    self.last_prompt_tokens = usage.prompt_tokens;
                 }
             }
 

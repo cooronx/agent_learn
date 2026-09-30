@@ -30,37 +30,51 @@ impl DeepSeekProvider {
     }
 
     fn build_request(&self, context: &Context) -> OpenAIChatCompletionRequest {
-        openai_completions::build_request(&self.model, context, true, serde_json::Map::new())
+        let mut extra_args = serde_json::Map::new();
+        extra_args.insert(
+            "stream_options".to_string(),
+            serde_json::json!({"include_usage" : true}),
+        );
+        openai_completions::build_request(&self.model, context, true, extra_args)
     }
 
     fn convert_chunk(chunk: OpenAIChatCompletionStreamChunk) -> Option<AssistantDelta> {
-        let choice = chunk.choices.into_iter().next()?;
-        let delta = choice.delta;
+        let usage = chunk.usage;
+        // 有可能存在最后一个chunk只有usage，没有choices的情况（虽然deepseek是没有这个问题的）
+        let choice = chunk.choices.into_iter().next();
 
-        let reasoning = delta
-            .extra
-            .get("reasoning_content")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
+        let (content, reasoning, tool_calls) = match choice {
+            Some(choice) => {
+                let delta = choice.delta;
+                let reasoning = delta
+                    .extra
+                    .get("reasoning_content")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                let tool_calls = delta
+                    .tool_calls
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|call| {
+                        let function = call.function;
+                        ToolCallDelta {
+                            index: call.index,
+                            id: call.id,
+                            name: function.as_ref().and_then(|f| f.name.clone()),
+                            arguments: function.as_ref().and_then(|f| f.arguments.clone()),
+                        }
+                    })
+                    .collect();
+                (delta.content, reasoning, tool_calls)
+            }
+            None => (None, None, Vec::new()),
+        };
 
-        let tool_calls = delta
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .map(|call| {
-                let function = call.function;
-                ToolCallDelta {
-                    index: call.index,
-                    id: call.id,
-                    name: function.as_ref().and_then(|f| f.name.clone()),
-                    arguments: function.as_ref().and_then(|f| f.arguments.clone()),
-                }
-            })
-            .collect();
         Some(AssistantDelta {
-            content: delta.content,
+            content,
             reasoning,
-            tool_calls: tool_calls,
+            tool_calls,
+            usage,
         })
     }
 }

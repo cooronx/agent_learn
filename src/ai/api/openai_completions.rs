@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::types::{
     AssistantMessage, Context, Model, ModelMessage, Role, SystemMessage, ToolCall,
-    ToolCallResultMessage, ToolDefinition, UserMessage,
+    ToolCallResultMessage, ToolDefinition, Usage, UserMessage,
 };
 
 type ExtraMapType = serde_json::Map<String, serde_json::Value>;
@@ -247,6 +247,8 @@ pub fn build_request(
 pub struct OpenAIChatCompletionStreamChunk {
     pub choices: Vec<OpenAIChatCompletionStreamChoice>,
 
+    #[serde(default)]
+    pub usage: Option<Usage>,
     #[serde(flatten)]
     pub extra: ExtraMapType,
 }
