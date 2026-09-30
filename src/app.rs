@@ -20,7 +20,7 @@ use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
 
 use crate::types::{
-    Message,
+    ChoiceDelta, Message,
     Role::{self, Assistant, User as TuiUser},
     UserCommand,
 };
@@ -38,11 +38,53 @@ impl tui_markdown::StyleSheet for CustomMarkdownStyle {
 }
 
 #[derive(Debug)]
+enum DisplayPart {
+    Content(String),
+    Reasoning(String),
+    ToolCall(String),
+}
+
+#[derive(Debug)]
 struct DisplayMessage {
     role: Role,
-    reasoning_content: String,
-    content: String,
-    tool_call_content: String,
+    parts: Vec<DisplayPart>,
+}
+
+impl DisplayMessage {
+    fn new(role: Role) -> Self {
+        Self {
+            role,
+            parts: Vec::new(),
+        }
+    }
+
+    // 按照 delta 到达的顺序保存，保证渲染时 assistant msg 和 tool call 是交错的
+    fn push_delta(&mut self, delta: ChoiceDelta) {
+        let part = match delta {
+            ChoiceDelta::OutputDelta(s) => DisplayPart::Content(s),
+            ChoiceDelta::ReasoningDelta(s) => DisplayPart::Reasoning(s),
+            ChoiceDelta::ToolCallContent(s) => DisplayPart::ToolCall(s),
+        };
+
+        match (self.parts.last_mut(), &part) {
+            (Some(DisplayPart::Content(existing)), DisplayPart::Content(new))
+            | (Some(DisplayPart::Reasoning(existing)), DisplayPart::Reasoning(new)) => {
+                existing.push_str(new);
+            }
+            (Some(DisplayPart::ToolCall(existing)), DisplayPart::ToolCall(new)) => {
+                existing.push_str("\n");
+                existing.push_str(new);
+            }
+            _ => self.parts.push(part),
+        }
+    }
+
+    fn has_output_content(&self) -> bool {
+        self.parts.iter().any(|part| match part {
+            DisplayPart::Content(content) => !content.is_empty(),
+            _ => false,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -176,6 +218,7 @@ impl App<'_> {
                 Ok(())
             }
             (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+                // 先把思考展示这个功能关闭了
                 // self.reasoning_expanded = !self.reasoning_expanded;
                 Ok(())
             }
@@ -183,10 +226,8 @@ impl App<'_> {
                 // 后面用于给ai发送消息
                 let msg = self.inputs.lines().join("\n");
                 self.display_message.push(DisplayMessage {
+                    parts: vec![DisplayPart::Content(msg.clone())],
                     role: TuiUser,
-                    content: msg.clone(),
-                    reasoning_content: String::default(),
-                    tool_call_content: String::default(),
                 });
                 self.message_sender
                     .send(Message::UserMessage(UserCommand::Submit(msg)))
@@ -231,30 +272,12 @@ impl App<'_> {
                 crate::types::AgentEvent::Started => {
                     // 新开一条消息，等于塞到最后面去
                     self.current_assitant_index = Some(self.display_message.len());
-                    self.display_message.push(DisplayMessage {
-                        role: Assistant,
-                        content: String::default(),
-                        reasoning_content: String::default(),
-                        tool_call_content: String::default(),
-                    });
+                    self.display_message.push(DisplayMessage::new(Assistant));
                 }
                 crate::types::AgentEvent::Delta(s) => {
                     if let Some(index) = self.current_assitant_index {
                         if let Some(display_str) = self.display_message.get_mut(index) {
-                            match s {
-                                crate::types::ChoiceDelta::OutputDelta(output_str) => {
-                                    display_str.content.push_str(&output_str);
-                                }
-                                crate::types::ChoiceDelta::ReasoningDelta(reasoning_str) => {
-                                    display_str.reasoning_content.push_str(&reasoning_str);
-                                }
-                                crate::types::ChoiceDelta::ToolCallContent(tool_call_str) => {
-                                    if !display_str.tool_call_content.is_empty() {
-                                        display_str.tool_call_content.push_str("\n");
-                                    }
-                                    display_str.tool_call_content.push_str(&tool_call_str);
-                                }
-                            };
+                            display_str.push_delta(s);
                         }
                     }
                 }
@@ -265,7 +288,7 @@ impl App<'_> {
                 crate::types::AgentEvent::Error(s) => {
                     if let Some(index) = self.current_assitant_index {
                         if let Some(display_str) = self.display_message.get_mut(index) {
-                            display_str.content.push_str(s.as_str());
+                            display_str.push_delta(ChoiceDelta::OutputDelta(s));
                         }
                     }
                     self.current_assitant_index = None;
@@ -306,7 +329,7 @@ impl App<'_> {
 
             let is_current = self.current_assitant_index == Some(index);
             let is_thinking_animation =
-                matches!(message.role, Assistant) && is_current && message.content.is_empty();
+                matches!(message.role, Assistant) && is_current && !message.has_output_content();
 
             if is_thinking_animation {
                 let frame = SPINNER_FRAMES[self.spinner_frame];
@@ -316,66 +339,64 @@ impl App<'_> {
                 )]))
             }
 
-            // 选渲染当前这条消息的 reasoning
-            if self.reasoning_expanded && !message.reasoning_content.is_empty() {
-                if let Some(reasoning_style) = reasoning_style {
-                    for reasoning_line in message.reasoning_content.split('\n') {
-                        lines.push(Line::from(vec![
-                            Span::styled("┊ ", reasoning_style),
-                            Span::styled(reasoning_line, reasoning_style),
-                        ]));
-                    }
-
+            // 按照 delta 到达的顺序渲染：assistant msg -> tool call -> assistant msg -> ...
+            for part in &message.parts {
+                match part {
                     // reasoning 和最终回答之间留一行
-                    if !message.content.is_empty() {
-                        lines.push(Line::default());
-                    }
-                }
-            }
-
-            // 渲染工具调用
-            if !message.tool_call_content.is_empty() {
-                let tool_style = Style::default().fg(Color::Yellow).italic();
-
-                for call in message.tool_call_content.split('\n') {
-                    lines.push(Line::from(vec![
-                        Span::styled("👀 ", tool_style),
-                        Span::styled(call, tool_style),
-                    ]));
-                }
-                lines.push(Line::default());
-            }
-
-            // 再渲染output
-            if !message.content.is_empty() {
-                match &message.role {
-                    Assistant => {
-                        // ai的最终回答用markdown来渲染一下，codex也是这样的
-                        let markdown_style = tui_markdown::Options::new(CustomMarkdownStyle);
-
-                        let markdown =
-                            tui_markdown::from_str_with_options(&message.content, &markdown_style);
-                        for (line_index, mut markdown_line) in
-                            markdown.lines.into_iter().enumerate()
-                        {
-                            let current_prefix = if line_index == 0 { "• " } else { "  " };
-                            markdown_line
-                                .spans
-                                .insert(0, Span::styled(current_prefix, prefix_style));
-
-                            lines.push(markdown_line);
+                    DisplayPart::Reasoning(reasoning) => {
+                        if !self.reasoning_expanded {
+                            continue;
+                        }
+                        if let Some(reasoning_style) = reasoning_style {
+                            for reasoning_line in reasoning.split('\n') {
+                                lines.push(Line::from(vec![
+                                    Span::styled("┊ ", reasoning_style),
+                                    Span::styled(reasoning_line, reasoning_style),
+                                ]));
+                            }
+                            lines.push(Line::default());
                         }
                     }
-                    _ => {
-                        for (line_index, content) in message.content.split('\n').enumerate() {
-                            let current_prefix = if line_index == 0 { prefix } else { "  " };
+                    DisplayPart::ToolCall(tool_call) => {
+                        let tool_style = Style::default().fg(Color::Yellow).italic();
 
+                        for call in tool_call.split('\n') {
                             lines.push(Line::from(vec![
-                                Span::styled(current_prefix, prefix_style),
-                                Span::styled(content, content_style),
+                                Span::styled("👀 ", tool_style),
+                                Span::styled(call, tool_style),
                             ]));
                         }
+                        lines.push(Line::default());
                     }
+                    DisplayPart::Content(content) => match &message.role {
+                        Assistant => {
+                            // ai的最终回答用markdown来渲染一下，codex也是这样的
+                            let markdown_style = tui_markdown::Options::new(CustomMarkdownStyle);
+
+                            let markdown =
+                                tui_markdown::from_str_with_options(content, &markdown_style);
+                            for (line_index, mut markdown_line) in
+                                markdown.lines.into_iter().enumerate()
+                            {
+                                let current_prefix = if line_index == 0 { "• " } else { "  " };
+                                markdown_line
+                                    .spans
+                                    .insert(0, Span::styled(current_prefix, prefix_style));
+
+                                lines.push(markdown_line);
+                            }
+                        }
+                        _ => {
+                            for (line_index, content) in content.split('\n').enumerate() {
+                                let current_prefix = if line_index == 0 { prefix } else { "  " };
+
+                                lines.push(Line::from(vec![
+                                    Span::styled(current_prefix, prefix_style),
+                                    Span::styled(content, content_style),
+                                ]));
+                            }
+                        }
+                    },
                 }
             }
             lines.push(Line::default());
