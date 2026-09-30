@@ -101,6 +101,18 @@ pub struct App<'a> {
     follow_tail: bool,
     reasoning_expanded: bool,
     spinner_frame: usize,
+
+    // ===== 右侧栏相关 =====
+    /// 当前工作目录，启动时取一次即可
+    working_dir: String,
+    /// 会话标题，取用户发出的第一句话
+    session_title: Option<String>,
+    /// 最近一次请求的输入 token 数（即当前上下文占用的 token 数）
+    prompt_tokens: u64,
+    /// 最近一次请求输入 + 输出累积的 token 数
+    total_tokens: u64,
+    /// 模型上下文窗口大小，用来计算百分比
+    context_limit: u64,
 }
 
 impl App<'_> {
@@ -121,6 +133,14 @@ impl App<'_> {
             // 2026.09.03 暂时一直设置为false，codex也没有展示给用户看思考过程，所以我们也没有必要
             reasoning_expanded: false,
             spinner_frame: 0,
+            working_dir: std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "unknown".to_string()),
+            session_title: None,
+            prompt_tokens: 0,
+            total_tokens: 0,
+            // 与 agent_loop 中的 context_limit 保持一致，可按模型调整
+            context_limit: 128_000,
         }
     }
 
@@ -169,17 +189,32 @@ impl App<'_> {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let title = Line::from("cooronx的超级简单coding agent")
-            .bold()
-            .blue()
-            .centered();
-        let trunks = Layout::vertical([Constraint::Percentage(90), Constraint::Percentage(10)])
-            .split(frame.area());
+        // 先在水平方向切一刀：左侧主区域 + 右侧栏
+        // 右侧栏固定 32 列，但如果终端太窄，则退化为 30% 宽度，保证主区域不被挤压
+        let sidebar_width = if frame.area().width >= 80 {
+            Constraint::Length(32)
+        } else {
+            Constraint::Percentage(30)
+        };
+        let columns =
+            Layout::horizontal([Constraint::Min(0), sidebar_width]).split(frame.area());
+
+        let main_area = columns[0];
+        let sidebar_area = columns[1];
+
+        // 主区域再垂直分割：消息列表 + 输入框
+        let trunks =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(main_area);
 
         // 生成需要渲染的line（以及填充格式）
         let lines = self.gen_main_lines();
 
         let para_main = Paragraph::new(lines).wrap(Wrap { trim: false });
+
+        let title = Line::from("cooronx的超级简单coding agent")
+            .bold()
+            .blue()
+            .centered();
 
         let area = trunks[0];
         let content_width = area.width.saturating_sub(2);
@@ -203,8 +238,87 @@ impl App<'_> {
         frame.render_widget(para_main, trunks[0]);
         frame.render_widget(&self.inputs, trunks[1]);
         force_redraw_area(frame.buffer_mut(), trunks[1]);
+
+        // 渲染右侧栏（Context / token / 工作目录 / 标题）
+        self.draw_sidebar(frame, sidebar_area);
+
         self.message_scroll = current_scoll;
         self.message_max_scroll = max_scorll;
+    }
+
+    /// 渲染右侧边栏
+    fn draw_sidebar(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::bordered().title(Line::from("Context").bold().cyan());
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // 计算上下文占用百分比（输入 token / 上下文窗口）
+        let percent = if self.context_limit == 0 {
+            0.0
+        } else {
+            self.prompt_tokens as f64 / self.context_limit as f64 * 100.0
+        };
+
+        // 简单的 token 条形图：宽度按 inner 宽度（减去一些留白）缩放
+        let bar_width = inner.width.saturating_sub(2) as usize;
+        let filled = if self.context_limit == 0 {
+            0
+        } else {
+            ((percent / 100.0) * bar_width as f64).round() as usize
+        }
+        .min(bar_width);
+        let bar_color = if percent >= 90.0 {
+            Color::Red
+        } else if percent >= 70.0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        let bar = Line::from(vec![
+            Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
+            Span::styled("░".repeat(bar_width - filled), Style::default().fg(Color::DarkGray)),
+        ]);
+
+        // 工作目录：太长时从左侧截断，优先保留尾部（更有信息量）
+        let dir = truncate_left(&self.working_dir, inner.width.saturating_sub(1) as usize);
+
+        // 标题：取用户第一句话，去掉换行并截断
+        let title = self
+            .session_title
+            .clone()
+            .unwrap_or_else(|| "(新对话)".to_string());
+        let title = truncate_right(&title, inner.width.saturating_sub(1) as usize);
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Token  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} / {}", self.prompt_tokens, self.context_limit),
+                    Style::default().fg(Color::White).bold(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>5.1}%", percent),
+                    Style::default().fg(bar_color).bold(),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("(累计 {})", self.total_tokens),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            bar,
+            Line::default(),
+            Line::from(Span::styled("工作目录", Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(dir, Style::default().fg(Color::White))),
+            Line::default(),
+            Line::from(Span::styled("标题", Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(title, Style::default().fg(Color::White))),
+        ];
+
+        let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(para, inner);
     }
 
     async fn on_key_event(&mut self, key: KeyEvent) -> Result<()> {
@@ -225,6 +339,12 @@ impl App<'_> {
             (_, KeyCode::Enter) => {
                 // 后面用于给ai发送消息
                 let msg = self.inputs.lines().join("\n");
+                // 如果是第一条用户消息，则把它作为本次对话的标题
+                if self.session_title.is_none() && !msg.trim().is_empty() {
+                    // 只取第一行，避免多行输入把标题撑爆
+                    let first_line = msg.lines().next().unwrap_or("").trim();
+                    self.session_title = Some(first_line.to_string());
+                }
                 self.display_message.push(DisplayMessage {
                     parts: vec![DisplayPart::Content(msg.clone())],
                     role: TuiUser,
@@ -280,6 +400,14 @@ impl App<'_> {
                             display_str.push_delta(s);
                         }
                     }
+                }
+                crate::types::AgentEvent::Usage {
+                    prompt_tokens,
+                    total_tokens,
+                } => {
+                    // 更新右侧栏的上下文占用信息
+                    self.prompt_tokens = prompt_tokens;
+                    self.total_tokens = total_tokens;
                 }
                 crate::types::AgentEvent::Done => {
                     // 结束了就置空
@@ -414,4 +542,33 @@ fn force_redraw_area(buffer: &mut Buffer, area: Rect) {
             }
         }
     }
+}
+
+/// 从左侧截断字符串，超出长度时保留尾部并加省略号（适用于路径）
+fn truncate_left(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    // 保留 max-1 个尾部字符，前面加省略号
+    let keep = max.saturating_sub(1);
+    let tail: String = chars[chars.len() - keep..].iter().collect();
+    format!("…{tail}")
+}
+
+/// 从右侧截断字符串，超出长度时保留头部并加省略号（适用于标题）
+fn truncate_right(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let head: String = chars[..keep].iter().collect();
+    format!("{head}…")
 }

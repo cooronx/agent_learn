@@ -36,6 +36,8 @@ pub struct Agent {
     context: ai::types::Context,
     tools: HashMap<String, Box<dyn Tool>>,
     last_prompt_tokens: u64,
+    /// 上下文窗口总大小（token），用来计算使用百分比
+    context_limit: u64,
 }
 
 impl Agent {
@@ -53,6 +55,8 @@ impl Agent {
             context: ai::types::Context::default(),
             tools: HashMap::new(),
             last_prompt_tokens: 0,
+            // 模型上下文窗口大小，deepseek-v4.1-flash 为 128k，可按模型调整
+            context_limit: 128_000,
         }
     }
 
@@ -180,6 +184,13 @@ Guidelines:
                 // 记录一下token数量
                 if let Some(usage) = resp.usage {
                     self.last_prompt_tokens = usage.prompt_tokens;
+                    // 每次收到 usage 就把最新的上下文占用情况推给 TUI 的右侧栏
+                    self.sender
+                        .send(AgentMessage(types::AgentEvent::Usage {
+                            prompt_tokens: usage.prompt_tokens,
+                            total_tokens: usage.total_tokens,
+                        }))
+                        .await?;
                 }
             }
 

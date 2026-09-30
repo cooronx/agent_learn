@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let (agent_msg_sender, agent_msg_recv) = mpsc::channel(100);
 
     let client = OpenAIChatCompletionClient::from_env()?;
-    let provider: Box<dyn Provider> = Box::new(DeepSeekProvider::new(client, "deepseek-v4-flash"));
+    let provider: Box<dyn Provider> = Box::new(DeepSeekProvider::new(client, "deepseek-v4.1-flash"));
     let config = AgentConfigBuilder::default()
         .model("deepseek-v4.1-flash")
         .build()?;
