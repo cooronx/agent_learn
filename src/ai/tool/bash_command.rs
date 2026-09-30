@@ -11,25 +11,21 @@ use crate::ai::tool::Tool;
 #[derive(Default)]
 pub struct BashCommandTool;
 
-
-#[derive(Deserialize,JsonSchema)]
+#[derive(Deserialize, JsonSchema)]
 pub struct BashCommandParameters {
-    #[schemars(
-        length(min = 1),
-        description = "The Bash command to execute"
-    )]
+    #[schemars(length(min = 1), description = "The Bash command to execute")]
     command: String,
     #[schemars(
         description = "Working directory. Relative paths are resolved from the startup directory. Default to the startup directory"
     )]
     cwd: Option<String>,
     #[schemars(
-        range(min = 1,max = 300000),
+        range(min = 1, max = 300000),
         description = "Maximum execution time in milliseconds. Defaults to 300,000."
     )]
     timeout_ms: Option<u64>,
     #[schemars(
-        range(min = 1,max = 1000000),
+        range(min = 1, max = 1000000),
         description = "Maximum characters for stdout and stderr. Defaults to 20,000"
     )]
     max_output_chars: Option<usize>,
@@ -94,26 +90,21 @@ impl Tool for BashCommandTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-
         let output = tokio::time::timeout(Duration::from_millis(timeout_ms), process.output())
-                .await.map_err(|_|eyre!("command timed out after {timeout_ms} ms"))??;
+            .await
+            .map_err(|_| eyre!("command timed out after {timeout_ms} ms"))??;
 
         let truncate = |bytes: &[u8]| -> (String, bool) {
             let text = String::from_utf8_lossy(bytes);
             match text.char_indices().nth(max_output_chars) {
-                Some((byte_index,_)) => {
-                    (text[..byte_index].to_owned(),true)
-                },
-                None => {
-                    (text.into_owned(),false)
-                },
+                Some((byte_index, _)) => (text[..byte_index].to_owned(), true),
+                None => (text.into_owned(), false),
             }
         };
 
         let (stdout, is_stdout_truncated) = truncate(&output.stdout);
-        let (stderr,is_stderr_truncated) = truncate(&output.stderr);
+        let (stderr, is_stderr_truncated) = truncate(&output.stderr);
 
-        
         Ok(serde_json::json!({
             "success": output.status.success(),
             "exit_code": output.status.code(),
@@ -121,7 +112,7 @@ impl Tool for BashCommandTool {
             "stderr": stderr,
             "is_stdout_truncated": is_stdout_truncated,
             "is_stderr_truncated": is_stderr_truncated,
-        }).to_string()
-        )
+        })
+        .to_string())
     }
 }

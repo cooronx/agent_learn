@@ -1,24 +1,24 @@
-use std::{io::ErrorKind::PermissionDenied, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    io::ErrorKind::PermissionDenied,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use async_trait::async_trait;
-use color_eyre::eyre::{eyre};
-use std::result::Result::Ok;
+use color_eyre::eyre::eyre;
+use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
-use schemars::{JsonSchema,schema_for};
+use std::result::Result::Ok;
 use tokio::{fs, io::AsyncWriteExt};
 
 use crate::ai::tool::Tool;
 
-
 // 用一个原子变量来生成临时文件名，避免冲突
-static TEMP_FILE_ID:AtomicU64 = AtomicU64::new(0);
-
+static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 pub struct WriteTool;
 
-
-#[derive(Deserialize,JsonSchema)]
+#[derive(Deserialize, JsonSchema)]
 pub struct WriteParameters {
     #[schemars(
         length(min = 1),
@@ -40,11 +40,11 @@ impl Tool for WriteTool {
 
     fn description(&self) -> Option<String> {
         Some(
-              "Create a UTF-8 text file or overwrite an existing regular file. \
+            "Create a UTF-8 text file or overwrite an existing regular file. \
                Creates missing parent directories. Existing content is fully replaced; \
                read an existing file before overwriting it. Symbolic links are rejected."
-                  .to_string(),
-          )
+                .to_string(),
+        )
     }
 
     fn parameters(&self) -> Option<serde_json::Value> {
@@ -70,23 +70,29 @@ impl Tool for WriteTool {
                     return Err(eyre!("target is read-only"));
                 }
                 Some(metadata.permissions())
-            },
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
             Err(err) => return Err(err.into()),
         };
 
         let parent = path
             .parent()
-            .ok_or_else(||eyre!("path must have a parent directory"))?;
+            .ok_or_else(|| eyre!("path must have a parent directory"))?;
 
         // 直接把文件夹给创建了（如果不存在的话
         fs::create_dir_all(parent).await?;
 
         let temp_path = parent.join(format!(
-            ".agent-write-{}-{}",std::process::id(),TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed)
+            ".agent-write-{}-{}",
+            std::process::id(),
+            TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed)
         ));
 
-        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temp_path).await?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .await?;
 
         let ret = async {
             file.write_all(args.content.as_bytes()).await?;
@@ -98,7 +104,8 @@ impl Tool for WriteTool {
             drop(file);
 
             fs::rename(&temp_path, &path).await
-        }.await;
+        }
+        .await;
 
         if ret.is_err() {
             let _ = fs::remove_file(&temp_path).await;
@@ -109,7 +116,7 @@ impl Tool for WriteTool {
         Ok(serde_json::json!({
             "path": path,
             "bytes_written": &args.content.len()
-        }).to_string())
-
+        })
+        .to_string())
     }
 }

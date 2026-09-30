@@ -6,11 +6,19 @@ use tokio::sync::mpsc;
 
 use crate::{
     ai::{
-        self, providers::Provider, tool::{Tool, bash_command::BashCommandTool, edit::EditTool, list::ListTool, read_file::ReadFileTool, write::WriteTool}, types::{
+        self,
+        providers::Provider,
+        tool::{
+            Tool, bash_command::BashCommandTool, edit::EditTool, list::ListTool,
+            read_file::ReadFileTool, write::WriteTool,
+        },
+        types::{
             AssistantMessage, ModelMessage, SystemMessage, ToolCall, ToolCallDelta,
             ToolCallResultMessage, ToolDefinition, UserMessage,
         },
-    }, config::AgentConfig, types::{
+    },
+    config::AgentConfig,
+    types::{
         self,
         AgentEvent::{Delta, Done, Error, Started},
         ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent},
@@ -48,7 +56,7 @@ impl Agent {
 
     fn build_system_prompt(&self) -> color_eyre::Result<String> {
         let system_prompt = format!(
-            r#"You are a coding agent belongs to cooronx, naming cooronx的超级简单coding agent.
+            r#"You are a coding agent belongs to cooronx, naming cooronx's super easy coding agent.
 
 Current working directory: {}
 
