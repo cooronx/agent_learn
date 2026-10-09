@@ -50,6 +50,7 @@ impl DeepSeekProvider {
                     .extra
                     .get("reasoning_content")
                     .and_then(serde_json::Value::as_str)
+                    .filter(|s| !s.is_empty())
                     .map(str::to_owned);
                 let tool_calls = delta
                     .tool_calls
