@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::{Arc, atomic::AtomicBool}};
 
 use color_eyre::eyre::{self, eyre};
 use serde::de;
@@ -16,14 +16,8 @@ use crate::{
             AssistantMessage, ModelMessage, SystemMessage, ToolCall, ToolCallDelta,
             ToolCallResultMessage, ToolDefinition, UserMessage,
         },
-    },
-    config::AgentConfig,
-    types::{
-        self,
-        AgentEvent::{Delta, Done, Error, Started},
-        ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent},
-        Message::{self, AgentMessage},
-        UserCommand,
+    }, config::AgentConfig, types::{
+        self, AgentEvent::{Cancelled, Delta, Done, Error, Started}, ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent}, Message::{self, AgentMessage}, UserCommand,
     },
 };
 use futures::{SinkExt, StreamExt};
@@ -38,6 +32,8 @@ pub struct Agent {
     last_prompt_tokens: u64,
     /// 上下文窗口总大小（token），用来计算使用百分比
     context_limit: u64,
+    /// 用户是否主动终止对话
+    is_cancelled: Arc<AtomicBool>,
 }
 
 impl Agent {
@@ -46,6 +42,7 @@ impl Agent {
         config: AgentConfig,
         sender: mpsc::Sender<Message>,
         receiver: mpsc::Receiver<Message>,
+        is_cancelled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             provider,
@@ -57,7 +54,12 @@ impl Agent {
             last_prompt_tokens: 0,
             // 模型上下文窗口大小，deepseek-v4.1-flash 为 128k，可按模型调整
             context_limit: 128_000,
+            is_cancelled,
         }
+    }
+
+    fn take_cancel(&self) -> bool {
+        self.is_cancelled.swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
     fn build_system_prompt(&self) -> color_eyre::Result<String> {
@@ -125,11 +127,21 @@ Guidelines:
         self.sender.send(Message::AgentMessage(Started)).await?;
 
         loop {
+            if self.take_cancel() {
+                    self.sender.send(AgentMessage(Cancelled)).await?;
+                    self.sender.send(AgentMessage(Done)).await?;
+                    return Ok(())
+            }
             let mut stream = self.provider.stream(&self.context).await?;
             let mut reasoning_output = String::default();
             let mut final_output = String::default();
             let mut pending_calls: Vec<ToolCallDelta> = Vec::new();
             while let Some(result) = stream.next().await {
+                if self.take_cancel() {
+                    self.sender.send(AgentMessage(Cancelled)).await?;
+                    self.sender.send(AgentMessage(Done)).await?;
+                    return Ok(())
+                }
                 let resp = result?;
                 // 思维链
                 if let Some(reasoning_content) = resp.reasoning {

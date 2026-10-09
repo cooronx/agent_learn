@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::{Arc, atomic::AtomicBool}, time::Duration};
 
 use color_eyre::Result;
 use crossterm::{
@@ -101,6 +101,7 @@ pub struct App<'a> {
     follow_tail: bool,
     reasoning_expanded: bool,
     spinner_frame: usize,
+    is_cancelled: Arc<AtomicBool>,
 
     // ===== 右侧栏相关 =====
     /// 当前工作目录，启动时取一次即可
@@ -116,7 +117,7 @@ pub struct App<'a> {
 }
 
 impl App<'_> {
-    pub fn new(sender: mpsc::Sender<Message>, recv: mpsc::Receiver<Message>) -> Self {
+    pub fn new(sender: mpsc::Sender<Message>, recv: mpsc::Receiver<Message>, is_cancelled: Arc<AtomicBool>) -> Self {
         let mut input = TextArea::default();
         input.set_block(Block::bordered().title("输入框"));
         Self {
@@ -133,6 +134,7 @@ impl App<'_> {
             // 2026.09.03 暂时一直设置为false，codex也没有展示给用户看思考过程，所以我们也没有必要
             reasoning_expanded: false,
             spinner_frame: 0,
+            is_cancelled,
             working_dir: std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "unknown".to_string()),
@@ -336,6 +338,11 @@ impl App<'_> {
                 // self.reasoning_expanded = !self.reasoning_expanded;
                 Ok(())
             }
+            (_,KeyCode::Esc) => {
+                // 用户主动终止了对话
+                self.is_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
             (_, KeyCode::Enter) => {
                 // 后面用于给ai发送消息
                 let msg = self.inputs.lines().join("\n");
@@ -421,6 +428,15 @@ impl App<'_> {
                     }
                     self.current_assitant_index = None;
                 }
+                crate::types::AgentEvent::Cancelled => {
+                    // 本次对话已经被用户终止了
+                    if let Some(index) = self.current_assitant_index {
+                        if let Some(display_str) = self.display_message.get_mut(index) {
+                            display_str.push_delta(ChoiceDelta::OutputDelta("已终止".to_string()));
+                        }
+                    }
+                    self.current_assitant_index = None;
+                },
             },
             Message::UserMessage(user_command) => {}
         }
