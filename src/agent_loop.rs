@@ -16,7 +16,7 @@ use crate::{
             AssistantMessage, ModelMessage, SystemMessage, ToolCall, ToolCallDelta,
             ToolCallResultMessage, ToolDefinition, UserMessage,
         },
-    }, config::AgentConfig, types::{
+    }, types::{
         self, AgentEvent::{Cancelled, Delta, Done, Error, Started}, ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent}, Message::{self, AgentMessage}, UserCommand,
     },
 };
@@ -24,7 +24,6 @@ use futures::{SinkExt, StreamExt};
 
 pub struct Agent {
     provider: Box<dyn Provider>,
-    config: AgentConfig,
     sender: mpsc::Sender<types::Message>,
     receiver: mpsc::Receiver<Message>,
     context: ai::types::Context,
@@ -39,14 +38,12 @@ pub struct Agent {
 impl Agent {
     pub fn new(
         provider: Box<dyn Provider>,
-        config: AgentConfig,
         sender: mpsc::Sender<Message>,
         receiver: mpsc::Receiver<Message>,
         is_cancelled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             provider,
-            config,
             sender,
             receiver,
             context: ai::types::Context::default(),
