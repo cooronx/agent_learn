@@ -43,6 +43,7 @@ impl Tool for ReadFileTool {
 
     fn description(&self) -> Option<String> {
         Some(format!("Read the contents of a file. Supports text files.
+        Each line is prefixed with its line number as `N: content`.
         For text files, output is truncated to {} lines. 
         Use offset/limit for large files. When you need the full file, continue with offset until complete.",self.limit))
     }
@@ -87,7 +88,9 @@ impl Tool for ReadFileTool {
             if line_number > 0 {
                 content.push('\n');
             }
-            content.push_str(&line);
+
+            let display_number = offset + line_number + 1;
+            content.push_str(&format!("{display_number}: {line}"));
         }
 
         Ok(content)
