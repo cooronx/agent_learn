@@ -5,11 +5,6 @@ pub enum Role {
     Error,
 }
 
-pub enum Message {
-    AgentMessage(AgentEvent),
-    UserMessage(UserCommand),
-}
-
 #[derive(Debug)]
 pub enum ChoiceDelta {
     OutputDelta(String),

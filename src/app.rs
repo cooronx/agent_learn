@@ -1,4 +1,7 @@
-use std::{sync::{Arc, atomic::AtomicBool}, time::Duration};
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use color_eyre::Result;
 use crossterm::{
@@ -20,7 +23,7 @@ use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
 
 use crate::types::{
-    ChoiceDelta, Message,
+    AgentEvent, ChoiceDelta,
     Role::{self, Assistant, User as TuiUser},
     UserCommand,
 };
@@ -90,8 +93,8 @@ impl DisplayMessage {
 #[derive(Debug)]
 pub struct App<'a> {
     running: bool,
-    message_recv: mpsc::Receiver<Message>,
-    message_sender: mpsc::Sender<Message>,
+    command_recv: mpsc::Receiver<AgentEvent>,
+    event_sender: mpsc::Sender<UserCommand>,
     display_message: Vec<DisplayMessage>,
     current_assitant_index: Option<usize>,
     event_stream: EventStream,
@@ -117,13 +120,17 @@ pub struct App<'a> {
 }
 
 impl App<'_> {
-    pub fn new(sender: mpsc::Sender<Message>, recv: mpsc::Receiver<Message>, is_cancelled: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        sender: mpsc::Sender<UserCommand>,
+        recv: mpsc::Receiver<AgentEvent>,
+        is_cancelled: Arc<AtomicBool>,
+    ) -> Self {
         let mut input = TextArea::default();
         input.set_block(Block::bordered().title("输入框"));
         Self {
             running: false,
-            message_recv: recv,
-            message_sender: sender,
+            command_recv: recv,
+            event_sender: sender,
             display_message: Vec::default(),
             current_assitant_index: None,
             event_stream: EventStream::default(),
@@ -179,10 +186,10 @@ impl App<'_> {
                 }
               }
 
-                message = self.message_recv.recv() => {
+                message = self.command_recv.recv() => {
                         if let Some(msg) = message {
                         // 收到了新的消息，那么也要切换到消息最末尾
-                        self.handler_agent_message(msg).await;
+                        self.handler_agent_event(msg).await;
                     }
                 }
             }
@@ -198,15 +205,13 @@ impl App<'_> {
         } else {
             Constraint::Percentage(30)
         };
-        let columns =
-            Layout::horizontal([Constraint::Min(0), sidebar_width]).split(frame.area());
+        let columns = Layout::horizontal([Constraint::Min(0), sidebar_width]).split(frame.area());
 
         let main_area = columns[0];
         let sidebar_area = columns[1];
 
         // 主区域再垂直分割：消息列表 + 输入框
-        let trunks =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(main_area);
+        let trunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(main_area);
 
         // 生成需要渲染的line（以及填充格式）
         let lines = self.gen_main_lines();
@@ -278,7 +283,10 @@ impl App<'_> {
         };
         let bar = Line::from(vec![
             Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
-            Span::styled("░".repeat(bar_width - filled), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "░".repeat(bar_width - filled),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
 
         // 工作目录：太长时从左侧截断，优先保留尾部（更有信息量）
@@ -312,7 +320,10 @@ impl App<'_> {
             ]),
             bar,
             Line::default(),
-            Line::from(Span::styled("工作目录", Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(
+                "工作目录",
+                Style::default().fg(Color::DarkGray),
+            )),
             Line::from(Span::styled(dir, Style::default().fg(Color::White))),
             Line::default(),
             Line::from(Span::styled("标题", Style::default().fg(Color::DarkGray))),
@@ -338,9 +349,10 @@ impl App<'_> {
                 // self.reasoning_expanded = !self.reasoning_expanded;
                 Ok(())
             }
-            (_,KeyCode::Esc) => {
+            (_, KeyCode::Esc) => {
                 // 用户主动终止了对话
-                self.is_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.is_cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
             (_, KeyCode::Enter) => {
@@ -356,9 +368,7 @@ impl App<'_> {
                     parts: vec![DisplayPart::Content(msg.clone())],
                     role: TuiUser,
                 });
-                self.message_sender
-                    .send(Message::UserMessage(UserCommand::Submit(msg)))
-                    .await?;
+                self.event_sender.send(UserCommand::Submit(msg)).await?;
                 // 发送消息后将输出框定位到最后一条消息
                 self.follow_tail = true;
                 // 发送完之后要清空输入框
@@ -393,52 +403,49 @@ impl App<'_> {
         Ok(())
     }
 
-    async fn handler_agent_message(&mut self, msg: Message) {
-        match msg {
-            Message::AgentMessage(agent_event) => match agent_event {
-                crate::types::AgentEvent::Started => {
-                    // 新开一条消息，等于塞到最后面去
-                    self.current_assitant_index = Some(self.display_message.len());
-                    self.display_message.push(DisplayMessage::new(Assistant));
-                }
-                crate::types::AgentEvent::Delta(s) => {
-                    if let Some(index) = self.current_assitant_index {
-                        if let Some(display_str) = self.display_message.get_mut(index) {
-                            display_str.push_delta(s);
-                        }
+    async fn handler_agent_event(&mut self, event: AgentEvent) {
+        match event {
+            crate::types::AgentEvent::Started => {
+                // 新开一条消息，等于塞到最后面去
+                self.current_assitant_index = Some(self.display_message.len());
+                self.display_message.push(DisplayMessage::new(Assistant));
+            }
+            crate::types::AgentEvent::Delta(s) => {
+                if let Some(index) = self.current_assitant_index {
+                    if let Some(display_str) = self.display_message.get_mut(index) {
+                        display_str.push_delta(s);
                     }
                 }
-                crate::types::AgentEvent::Usage {
-                    prompt_tokens,
-                    total_tokens,
-                } => {
-                    // 更新右侧栏的上下文占用信息
-                    self.prompt_tokens = prompt_tokens;
-                    self.total_tokens = total_tokens;
-                }
-                crate::types::AgentEvent::Done => {
-                    // 结束了就置空
-                    self.current_assitant_index = None;
-                }
-                crate::types::AgentEvent::Error(s) => {
-                    if let Some(index) = self.current_assitant_index {
-                        if let Some(display_str) = self.display_message.get_mut(index) {
-                            display_str.push_delta(ChoiceDelta::OutputDelta(s));
-                        }
+            }
+            crate::types::AgentEvent::Usage {
+                prompt_tokens,
+                total_tokens,
+            } => {
+                // 更新右侧栏的上下文占用信息
+                self.prompt_tokens = prompt_tokens;
+                self.total_tokens = total_tokens;
+            }
+            crate::types::AgentEvent::Done => {
+                // 结束了就置空
+                self.current_assitant_index = None;
+            }
+            crate::types::AgentEvent::Error(s) => {
+                if let Some(index) = self.current_assitant_index {
+                    if let Some(display_str) = self.display_message.get_mut(index) {
+                        display_str.push_delta(ChoiceDelta::OutputDelta(s));
                     }
-                    self.current_assitant_index = None;
                 }
-                crate::types::AgentEvent::Cancelled => {
-                    // 本次对话已经被用户终止了
-                    if let Some(index) = self.current_assitant_index {
-                        if let Some(display_str) = self.display_message.get_mut(index) {
-                            display_str.push_delta(ChoiceDelta::OutputDelta("已终止".to_string()));
-                        }
+                self.current_assitant_index = None;
+            }
+            crate::types::AgentEvent::Cancelled => {
+                // 本次对话已经被用户终止了
+                if let Some(index) = self.current_assitant_index {
+                    if let Some(display_str) = self.display_message.get_mut(index) {
+                        display_str.push_delta(ChoiceDelta::OutputDelta("已终止".to_string()));
                     }
-                    self.current_assitant_index = None;
-                },
-            },
-            Message::UserMessage(user_command) => {}
+                }
+                self.current_assitant_index = None;
+            }
         }
     }
 

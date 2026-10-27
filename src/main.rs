@@ -1,8 +1,12 @@
 mod agent_loop;
 mod ai;
 mod app;
+mod session;
 mod types;
-use std::{io::stdout, sync::{Arc, atomic::AtomicBool}};
+use std::{
+    io::stdout,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use crate::{
     agent_loop::Agent,
@@ -33,15 +37,25 @@ async fn main() -> Result<()> {
     let (agent_msg_sender, agent_msg_recv) = mpsc::channel(100);
 
     let client = OpenAIChatCompletionClient::from_env()?;
-    let provider: Box<dyn Provider> = Box::new(DeepSeekProvider::new(client, "deepseek-v4.1-flash"));
+    let provider: Box<dyn Provider> =
+        Box::new(DeepSeekProvider::new(client, "deepseek-v4.1-flash"));
 
     let is_cancelled = Arc::new(AtomicBool::new(false));
 
-    let agent = Agent::new(provider, agent_msg_sender.clone(), user_msg_recv,is_cancelled.clone());
+    let agent = Agent::new(
+        provider,
+        agent_msg_sender.clone(),
+        user_msg_recv,
+        is_cancelled.clone(),
+    );
     let task = tokio::spawn(agent.run());
-    App::new(user_msg_sender.clone(), agent_msg_recv,is_cancelled.clone())
-        .run(terminal)
-        .await?;
+    App::new(
+        user_msg_sender.clone(),
+        agent_msg_recv,
+        is_cancelled.clone(),
+    )
+    .run(terminal)
+    .await?;
     task.abort();
     execute!(stdout(), DisableMouseCapture)?;
     ratatui::restore();

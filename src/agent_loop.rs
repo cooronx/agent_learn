@@ -1,7 +1,9 @@
-use std::{collections::HashMap, sync::{Arc, atomic::AtomicBool}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use color_eyre::eyre::{self, eyre};
-use serde::de;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -17,15 +19,15 @@ use crate::{
             ToolCallResultMessage, ToolDefinition, UserMessage,
         },
     }, types::{
-        self, AgentEvent::{Cancelled, Delta, Done, Error, Started}, ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent}, Message::{self, AgentMessage}, UserCommand,
+        AgentEvent::{self}, ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent}, UserCommand,
     },
 };
 use futures::{SinkExt, StreamExt};
 
 pub struct Agent {
     provider: Box<dyn Provider>,
-    sender: mpsc::Sender<types::Message>,
-    receiver: mpsc::Receiver<Message>,
+    sender: mpsc::Sender<AgentEvent>,
+    receiver: mpsc::Receiver<UserCommand>,
     context: ai::types::Context,
     tools: HashMap<String, Box<dyn Tool>>,
     last_prompt_tokens: u64,
@@ -38,8 +40,8 @@ pub struct Agent {
 impl Agent {
     pub fn new(
         provider: Box<dyn Provider>,
-        sender: mpsc::Sender<Message>,
-        receiver: mpsc::Receiver<Message>,
+        sender: mpsc::Sender<AgentEvent>,
+        receiver: mpsc::Receiver<UserCommand>,
         is_cancelled: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -56,7 +58,8 @@ impl Agent {
     }
 
     fn take_cancel(&self) -> bool {
-        self.is_cancelled.swap(false, std::sync::atomic::Ordering::SeqCst)
+        self.is_cancelled
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
     fn build_system_prompt(&self) -> color_eyre::Result<String> {
@@ -92,10 +95,9 @@ Guidelines:
             self.register_tool(WriteTool::default());
             self.register_tool(EditTool::default());
         }
-        while let Some(message) = self.receiver.recv().await {
-            match message {
-                Message::UserMessage(user_command) => match user_command {
-                    UserCommand::Submit(msg) => {
+        while let Some(command) = self.receiver.recv().await {
+            match command {
+                UserCommand::Submit(msg) => {
                         let ret = async {
                             let user_msg = ModelMessage::User(UserMessage { content: msg });
                             self.context.messages.push(user_msg);
@@ -106,28 +108,26 @@ Guidelines:
                         // 错误信息也一并发过去展示
                         if let Err(err) = ret {
                             self.sender
-                                .send(AgentMessage(Error(err.to_string())))
+                                .send(AgentEvent::Error(err.to_string()))
                                 .await?;
                         }
                     }
                     UserCommand::Shutdown => {
                         return Ok(());
                     }
-                },
-                Message::AgentMessage(_) => {}
             }
         }
         Ok(())
     }
 
     pub async fn agent_loop(&mut self) -> color_eyre::Result<()> {
-        self.sender.send(Message::AgentMessage(Started)).await?;
+        self.sender.send(AgentEvent::Started).await?;
 
         loop {
             if self.take_cancel() {
-                    self.sender.send(AgentMessage(Cancelled)).await?;
-                    self.sender.send(AgentMessage(Done)).await?;
-                    return Ok(())
+                self.sender.send(AgentEvent::Cancelled).await?;
+                self.sender.send(AgentEvent::Done).await?;
+                return Ok(());
             }
             let mut stream = self.provider.stream(&self.context).await?;
             let mut reasoning_output = String::default();
@@ -135,22 +135,22 @@ Guidelines:
             let mut pending_calls: Vec<ToolCallDelta> = Vec::new();
             while let Some(result) = stream.next().await {
                 if self.take_cancel() {
-                    self.sender.send(AgentMessage(Cancelled)).await?;
-                    self.sender.send(AgentMessage(Done)).await?;
-                    return Ok(())
+                    self.sender.send(AgentEvent::Cancelled).await?;
+                    self.sender.send(AgentEvent::Done).await?;
+                    return Ok(());
                 }
                 let resp = result?;
                 // 思维链
                 if let Some(reasoning_content) = resp.reasoning {
                     reasoning_output.push_str(&reasoning_content);
                     let reasoning_content =
-                        AgentMessage(Delta(ReasoningDelta(reasoning_content.clone())));
+                        AgentEvent::Delta(ReasoningDelta(reasoning_content.clone()));
                     self.sender.send(reasoning_content).await?;
                 }
                 // 回复
                 if let Some(content) = resp.content {
                     final_output.push_str(&content);
-                    let output_content = AgentMessage(Delta(OutputDelta(content.clone())));
+                    let output_content = AgentEvent::Delta(OutputDelta(content.clone()));
                     self.sender.send(output_content).await?;
                 }
                 // 工具调用(按照index流式拼接起来)
@@ -195,10 +195,10 @@ Guidelines:
                     self.last_prompt_tokens = usage.prompt_tokens;
                     // 每次收到 usage 就把最新的上下文占用情况推给 TUI 的右侧栏
                     self.sender
-                        .send(AgentMessage(types::AgentEvent::Usage {
+                        .send(AgentEvent::Usage {
                             prompt_tokens: usage.prompt_tokens,
                             total_tokens: usage.total_tokens,
-                        }))
+                        })
                         .await?;
                 }
             }
@@ -240,10 +240,10 @@ Guidelines:
             // 执行toolcall
             for tool_call in tool_calls {
                 // 发送工具调用给tui界面
-                let tool_call_content = AgentMessage(Delta(ToolCallContent(format!(
+                let tool_call_content = AgentEvent::Delta(ToolCallContent(format!(
                     "{} {}",
                     tool_call.name, tool_call.arguments
-                ))));
+                )));
                 self.sender.send(tool_call_content).await?;
                 let content = match self.execute_tool_call(&tool_call).await {
                     Ok(output) => output,
@@ -260,7 +260,7 @@ Guidelines:
             }
         }
 
-        self.sender.send(Message::AgentMessage(Done)).await?;
+        self.sender.send(AgentEvent::Done).await?;
         Ok(())
     }
 
