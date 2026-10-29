@@ -1,31 +1,25 @@
-use std::{
-    sync::{Arc, atomic::AtomicBool},
-    time::Duration,
-};
+use std::time::Duration;
 
 use color_eyre::Result;
-use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent},
-    execute,
-    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame,
     buffer::{Buffer, CellDiffOption},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
-    symbols::line,
     text::{Line, Span},
     widgets::{Block, Paragraph, Wrap},
 };
-use ratatui_textarea::{TextArea, WrapMode};
+use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
 
 use crate::types::{
-    AgentEvent, ChoiceDelta,
+    AgentEvent,
     Role::{self, Assistant, User as TuiUser},
-    UserCommand,
+    TurnResult, UserCommand,
 };
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -45,6 +39,7 @@ enum DisplayPart {
     Content(String),
     Reasoning(String),
     ToolCall(String),
+    Status(String),
 }
 
 #[derive(Debug)]
@@ -62,13 +57,7 @@ impl DisplayMessage {
     }
 
     // 按照 delta 到达的顺序保存，保证渲染时 assistant msg 和 tool call 是交错的
-    fn push_delta(&mut self, delta: ChoiceDelta) {
-        let part = match delta {
-            ChoiceDelta::OutputDelta(s) => DisplayPart::Content(s),
-            ChoiceDelta::ReasoningDelta(s) => DisplayPart::Reasoning(s),
-            ChoiceDelta::ToolCallContent(s) => DisplayPart::ToolCall(s),
-        };
-
+    fn push_part(&mut self, part: DisplayPart) {
         match (self.parts.last_mut(), &part) {
             (Some(DisplayPart::Content(existing)), DisplayPart::Content(new))
             | (Some(DisplayPart::Reasoning(existing)), DisplayPart::Reasoning(new)) => {
@@ -93,18 +82,18 @@ impl DisplayMessage {
 #[derive(Debug)]
 pub struct App<'a> {
     running: bool,
-    command_recv: mpsc::Receiver<AgentEvent>,
-    event_sender: mpsc::Sender<UserCommand>,
+    events: mpsc::Receiver<AgentEvent>,
+    commands: mpsc::Sender<UserCommand>,
     display_message: Vec<DisplayMessage>,
-    current_assitant_index: Option<usize>,
-    event_stream: EventStream,
+    current_assistant_index: Option<usize>,
     inputs: TextArea<'a>,
     message_scroll: u16,
     message_max_scroll: u16,
     follow_tail: bool,
     reasoning_expanded: bool,
     spinner_frame: usize,
-    is_cancelled: Arc<AtomicBool>,
+    busy: bool,
+    stopping: bool,
 
     // ===== 右侧栏相关 =====
     /// 当前工作目录，启动时取一次即可
@@ -123,17 +112,16 @@ impl App<'_> {
     pub fn new(
         sender: mpsc::Sender<UserCommand>,
         recv: mpsc::Receiver<AgentEvent>,
-        is_cancelled: Arc<AtomicBool>,
+        context_limit: u64,
     ) -> Self {
         let mut input = TextArea::default();
         input.set_block(Block::bordered().title("输入框"));
         Self {
             running: false,
-            command_recv: recv,
-            event_sender: sender,
+            events: recv,
+            commands: sender,
             display_message: Vec::default(),
-            current_assitant_index: None,
-            event_stream: EventStream::default(),
+            current_assistant_index: None,
             inputs: input,
             message_scroll: 0,
             message_max_scroll: 0,
@@ -141,20 +129,21 @@ impl App<'_> {
             // 2026.09.03 暂时一直设置为false，codex也没有展示给用户看思考过程，所以我们也没有必要
             reasoning_expanded: false,
             spinner_frame: 0,
-            is_cancelled,
+            busy: false,
+            stopping: false,
             working_dir: std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "unknown".to_string()),
             session_title: None,
             prompt_tokens: 0,
             total_tokens: 0,
-            // 与 agent_loop 中的 context_limit 保持一致，可按模型调整
-            context_limit: 128_000,
+            context_limit,
         }
     }
 
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> color_eyre::Result<()> {
         self.running = true;
+        let mut event_stream = EventStream::new();
 
         // thinking动画
         let mut spinner_tick = tokio::time::interval(Duration::from_millis(50));
@@ -166,13 +155,13 @@ impl App<'_> {
 
                 // 动画
                 _ = spinner_tick.tick() => {
-                    if self.current_assitant_index.is_some() {
+                    if self.current_assistant_index.is_some() {
                         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
                     }
                 }
 
 
-                event = self.event_stream.next() => {
+                event = event_stream.next() => {
                 match event {
                     Some(Ok(Event::Key(key))) => {
                         if key.kind == KeyEventKind::Press {
@@ -186,10 +175,12 @@ impl App<'_> {
                 }
               }
 
-                message = self.command_recv.recv() => {
+                message = self.events.recv() => {
                         if let Some(msg) = message {
                         // 收到了新的消息，那么也要切换到消息最末尾
-                        self.handler_agent_event(msg).await;
+                        self.apply_event(msg);
+                    } else {
+                        self.running = false;
                     }
                 }
             }
@@ -314,7 +305,7 @@ impl App<'_> {
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    format!("(累计 {})", self.total_tokens),
+                    format!("(本次总计 {})", self.total_tokens),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]),
@@ -351,13 +342,29 @@ impl App<'_> {
             }
             (_, KeyCode::Esc) => {
                 // 用户主动终止了对话
-                self.is_cancelled
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                if self.busy && !self.stopping {
+                    self.commands.send(UserCommand::Cancel).await?;
+                    self.stopping = true;
+                }
                 Ok(())
             }
             (_, KeyCode::Enter) => {
                 // 后面用于给ai发送消息
+                if self.busy {
+                    return Ok(());
+                }
                 let msg = self.inputs.lines().join("\n");
+                if msg.trim().is_empty() {
+                    return Ok(());
+                }
+                if let Err(err) = self.commands.send(UserCommand::Submit(msg.clone())).await {
+                    self.display_message.push(DisplayMessage {
+                        role: Role::Error,
+                        parts: vec![DisplayPart::Status(err.to_string())],
+                    });
+                    return Ok(());
+                }
+                self.busy = true;
                 // 如果是第一条用户消息，则把它作为本次对话的标题
                 if self.session_title.is_none() && !msg.trim().is_empty() {
                     // 只取第一行，避免多行输入把标题撑爆
@@ -368,7 +375,6 @@ impl App<'_> {
                     parts: vec![DisplayPart::Content(msg.clone())],
                     role: TuiUser,
                 });
-                self.event_sender.send(UserCommand::Submit(msg)).await?;
                 // 发送消息后将输出框定位到最后一条消息
                 self.follow_tail = true;
                 // 发送完之后要清空输入框
@@ -403,52 +409,60 @@ impl App<'_> {
         Ok(())
     }
 
-    async fn handler_agent_event(&mut self, event: AgentEvent) {
-        match event {
-            crate::types::AgentEvent::Started => {
-                // 新开一条消息，等于塞到最后面去
-                self.current_assitant_index = Some(self.display_message.len());
+    fn apply_event(&mut self, event: AgentEvent) {
+        let part = match event {
+            AgentEvent::TurnStarted => {
+                self.busy = true;
+                self.current_assistant_index = Some(self.display_message.len());
                 self.display_message.push(DisplayMessage::new(Assistant));
+                None
             }
-            crate::types::AgentEvent::Title(title) => {
-                // 用模型生成的标题替换首行兜底标题
+            AgentEvent::TitleUpdated(title) => {
                 self.session_title = Some(title);
+                None
             }
-            crate::types::AgentEvent::Delta(s) => {
-                if let Some(index) = self.current_assitant_index {
-                    if let Some(display_str) = self.display_message.get_mut(index) {
-                        display_str.push_delta(s);
-                    }
+            AgentEvent::TextDelta(text) => Some(DisplayPart::Content(text)),
+            AgentEvent::ReasoningDelta(text) => Some(DisplayPart::Reasoning(text)),
+            AgentEvent::ToolStarted(call) => Some(DisplayPart::ToolCall(format!(
+                "[{}] {} {}",
+                call.id, call.name, call.arguments
+            ))),
+            AgentEvent::ToolResult {
+                call_id,
+                output,
+                status,
+            } => Some(DisplayPart::ToolCall(format!(
+                "[{call_id}] {status:?}: {output}"
+            ))),
+            AgentEvent::UsageUpdated(usage) => {
+                self.prompt_tokens = usage.prompt_tokens;
+                self.total_tokens = usage.total_tokens;
+                None
+            }
+            AgentEvent::TurnFinished(outcome) => {
+                let status = match outcome {
+                    TurnResult::Completed => None,
+                    TurnResult::Cancelled => Some("已中断".to_string()),
+                    TurnResult::Failed(error) => Some(format!("失败：{error}")),
+                };
+                if let Some(status) = status {
+                    self.push_current(DisplayPart::Status(status));
                 }
+                self.current_assistant_index = None;
+                self.busy = false;
+                self.stopping = false;
+                None
             }
-            crate::types::AgentEvent::Usage {
-                prompt_tokens,
-                total_tokens,
-            } => {
-                // 更新右侧栏的上下文占用信息
-                self.prompt_tokens = prompt_tokens;
-                self.total_tokens = total_tokens;
-            }
-            crate::types::AgentEvent::Done => {
-                // 结束了就置空
-                self.current_assitant_index = None;
-            }
-            crate::types::AgentEvent::Error(s) => {
-                if let Some(index) = self.current_assitant_index {
-                    if let Some(display_str) = self.display_message.get_mut(index) {
-                        display_str.push_delta(ChoiceDelta::OutputDelta(s));
-                    }
-                }
-                self.current_assitant_index = None;
-            }
-            crate::types::AgentEvent::Cancelled => {
-                // 本次对话已经被用户终止了
-                if let Some(index) = self.current_assitant_index {
-                    if let Some(display_str) = self.display_message.get_mut(index) {
-                        display_str.push_delta(ChoiceDelta::OutputDelta("已终止".to_string()));
-                    }
-                }
-                self.current_assitant_index = None;
+        };
+        if let Some(part) = part {
+            self.push_current(part);
+        }
+    }
+
+    fn push_current(&mut self, part: DisplayPart) {
+        if let Some(index) = self.current_assistant_index {
+            if let Some(message) = self.display_message.get_mut(index) {
+                message.push_part(part);
             }
         }
     }
@@ -482,7 +496,10 @@ impl App<'_> {
                 ),
             };
 
-            let is_current = self.current_assitant_index == Some(index);
+            if self.stopping && self.current_assistant_index == Some(index) {
+                lines.push(Line::from("正在停止，等待当前工具完成…").yellow());
+            }
+            let is_current = self.current_assistant_index == Some(index);
             let is_thinking_animation =
                 matches!(message.role, Assistant) && is_current && !message.has_output_content();
 
@@ -511,6 +528,9 @@ impl App<'_> {
                             }
                             lines.push(Line::default());
                         }
+                    }
+                    DisplayPart::Status(status) => {
+                        lines.push(Line::from(status.as_str()).yellow());
                     }
                     DisplayPart::ToolCall(tool_call) => {
                         let tool_style = Style::default().fg(Color::Yellow).italic();

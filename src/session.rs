@@ -1,4 +1,8 @@
-use std::{fs::{File, OpenOptions}, io::{BufRead, BufReader}, path::{Path, PathBuf}};
+use std::{
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+};
 
 use std::io::Write;
 
@@ -9,7 +13,7 @@ use chrono::Utc;
 use crate::ai::types::ModelMessage;
 
 // 一次对话的元信息
-#[derive(Debug,Clone,Serialize,Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     // uuid
     pub id: String,
@@ -19,12 +23,11 @@ pub struct SessionMeta {
     pub created_at: u64,
 }
 
-#[derive(Debug,Clone,Serialize,Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum SessionRecord {
     Meta(SessionMeta),
-    Message(ModelMessage)
+    Message(ModelMessage),
 }
-
 
 pub struct Session {
     path: PathBuf,
@@ -33,16 +36,14 @@ pub struct Session {
 }
 
 impl Session {
-
     /// 新建会话
     pub fn create(
         dir: &Path,
         cwd: &str,
         model: &str,
-    ) -> color_eyre::Result<(Self, Vec<ModelMessage>)> 
-    {
+    ) -> color_eyre::Result<(Self, Vec<ModelMessage>)> {
         let id = uuid::Uuid::new_v4().to_string();
-        let path = format!("{}.jsonl",id);
+        let path = format!("{}.jsonl", id);
         let path = dir.join(path);
 
         let meta = SessionMeta {
@@ -65,9 +66,16 @@ impl Session {
 
     /// 打开一个已经存在的session文件
     pub fn open(path: &Path) -> color_eyre::Result<(Self, Vec<ModelMessage>)> {
-        let (meta,messages) = read_session(path)?;
+        let (meta, messages) = read_session(path)?;
         let file = OpenOptions::new().append(true).open(path)?;
-        Ok((Self{ path: path.to_path_buf(), meta, file }, messages))
+        Ok((
+            Self {
+                path: path.to_path_buf(),
+                meta,
+                file,
+            },
+            messages,
+        ))
     }
 
     /// 同步记录一条进入session
@@ -80,12 +88,10 @@ impl Session {
         self.file.flush()?;
         Ok(())
     }
-
 }
 
-
 /// 读取Session文件
-fn read_session(path: &Path) -> color_eyre::Result<(SessionMeta,Vec<ModelMessage>)> {
+fn read_session(path: &Path) -> color_eyre::Result<(SessionMeta, Vec<ModelMessage>)> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
@@ -96,16 +102,18 @@ fn read_session(path: &Path) -> color_eyre::Result<(SessionMeta,Vec<ModelMessage
         let line = line?;
 
         // 反序列化失败的情况，可能是这个session崩溃了之类的情况
-        let Ok(record) = serde_json::from_str::<SessionRecord>(&line) else {continue;};
-        
+        let Ok(record) = serde_json::from_str::<SessionRecord>(&line) else {
+            continue;
+        };
+
         match record {
             SessionRecord::Meta(session_meta) => meta = Some(session_meta),
             SessionRecord::Message(model_message) => messages.push(model_message),
         }
     }
 
-    let meta = meta.ok_or_else(||{color_eyre::eyre::eyre!("session file no meta: {}",path.display())})?;
+    let meta =
+        meta.ok_or_else(|| color_eyre::eyre::eyre!("session file no meta: {}", path.display()))?;
 
-    Ok((meta,messages))
-    
+    Ok((meta, messages))
 }

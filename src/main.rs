@@ -3,10 +3,7 @@ mod ai;
 mod app;
 mod session;
 mod types;
-use std::{
-    io::stdout,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::io::stdout;
 
 use crate::{
     agent_loop::Agent,
@@ -28,37 +25,28 @@ use tokio::sync::mpsc;
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     color_eyre::install()?;
-    let terminal = ratatui::init();
-    // 激活鼠标捕捉
-    execute!(stdout(), EnableMouseCapture)?;
-    // 这个是用来用户和agent之间交互的通道
-    let (user_msg_sender, user_msg_recv) = mpsc::channel(100);
-    // 这个是agent和tui界面之间交互的通道
-    let (agent_msg_sender, agent_msg_recv) = mpsc::channel(100);
-
     let client = OpenAIChatCompletionClient::from_env()?;
     let provider: Box<dyn Provider> =
         Box::new(DeepSeekProvider::new(client, "deepseek-v4.1-flash"));
-
-    let is_cancelled = Arc::new(AtomicBool::new(false));
-
-    let agent = Agent::new(
-        provider,
-        agent_msg_sender.clone(),
-        user_msg_recv,
-        is_cancelled.clone(),
-    );
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (event_tx, event_rx) = mpsc::channel(100);
+    let agent = Agent::new(provider, event_tx, command_rx);
+    let terminal = ratatui::init();
+    let mouse_result = execute!(stdout(), EnableMouseCapture);
+    if let Err(error) = mouse_result {
+        ratatui::restore();
+        return Err(error.into());
+    }
     let task = tokio::spawn(agent.run());
-    App::new(
-        user_msg_sender.clone(),
-        agent_msg_recv,
-        is_cancelled.clone(),
-    )
-    .run(terminal)
-    .await?;
-    task.abort();
-    execute!(stdout(), DisableMouseCapture)?;
+    let result = App::new(command_tx.clone(), event_rx, 128_000)
+        .run(terminal)
+        .await;
+    // App drops its event receiver on exit, releasing any blocked event send.
+    let _ = command_tx.send(types::UserCommand::Shutdown).await;
+    let mouse_result = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
-
-    Ok(())
+    let agent_result = task.await?;
+    result?;
+    mouse_result?;
+    agent_result
 }

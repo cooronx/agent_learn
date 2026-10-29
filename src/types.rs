@@ -1,3 +1,5 @@
+use crate::ai::types::{ToolCall, Usage};
+
 #[derive(Debug)]
 pub enum Role {
     User,
@@ -6,32 +8,36 @@ pub enum Role {
 }
 
 #[derive(Debug)]
-pub enum ChoiceDelta {
-    OutputDelta(String),
+pub enum AgentEvent {
+    TurnStarted,
+    TitleUpdated(String),
+    TextDelta(String),
     ReasoningDelta(String),
-    ToolCallContent(String),
+    ToolStarted(ToolCall),
+    ToolResult {
+        call_id: String,
+        output: String,
+        status: ToolStatus,
+    },
+    UsageUpdated(Usage),
+    TurnFinished(TurnResult),
 }
 
 #[derive(Debug)]
-pub enum AgentEvent {
-    Started,
-    /// 模型生成的会话标题
-    Title(String),
-    Delta(ChoiceDelta),
-    // 用户主动取消
+pub enum ToolStatus {
+    Completed,
+    Failed,
     Cancelled,
-    Done,
-    Error(String),
-    /// 本次请求的 token 用量，用来在右侧栏展示上下文占用情况
-    Usage {
-        /// 输入 token 数，也就是当前上下文占用的 token
-        prompt_tokens: u64,
-        /// 输入 + 输出累积的 token 数
-        total_tokens: u64,
-    },
+}
+#[derive(Debug)]
+pub enum TurnResult {
+    Completed,
+    Cancelled,
+    Failed(String),
 }
 
 pub enum UserCommand {
     Submit(String),
+    Cancel,
     Shutdown,
 }

@@ -79,6 +79,7 @@ pub struct ToolCallDelta {
 
 #[derive(Debug, Clone, Default)]
 pub struct AssistantDelta {
+    pub finish_reason: Option<String>,
     pub content: Option<String>,
     pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCallDelta>,

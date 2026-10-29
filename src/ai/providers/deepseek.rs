@@ -3,9 +3,7 @@ use color_eyre::eyre::eyre;
 use futures::StreamExt;
 
 use crate::ai::{
-    api::openai_completions::{
-        self, OpenAIChatCompletionRequest, OpenAIChatCompletionStreamChunk,
-    },
+    api::openai_completions::{self, OpenAIChatCompletionRequest, OpenAIChatCompletionStreamChunk},
     client::OpenAIChatCompletionClient,
     providers::{Provider, ProviderStream},
     types::{AssistantDelta, AssistantMessage, Context, Model, ToolCallDelta},
@@ -48,7 +46,7 @@ impl DeepSeekProvider {
         // 有可能存在最后一个chunk只有usage，没有choices的情况（虽然deepseek是没有这个问题的）
         let choice = chunk.choices.into_iter().next();
 
-        let (content, reasoning, tool_calls) = match choice {
+        let (content, reasoning, tool_calls, finish_reason) = match choice {
             Some(choice) => {
                 let delta = choice.delta;
                 let reasoning = delta
@@ -71,12 +69,13 @@ impl DeepSeekProvider {
                         }
                     })
                     .collect();
-                (delta.content, reasoning, tool_calls)
+                (delta.content, reasoning, tool_calls, choice.finish_reason)
             }
-            None => (None, None, Vec::new()),
+            None => (None, None, Vec::new(), None),
         };
 
         Some(AssistantDelta {
+            finish_reason,
             content,
             reasoning,
             tool_calls,

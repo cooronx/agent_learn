@@ -1,67 +1,138 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, atomic::AtomicBool},
-};
-
-use color_eyre::eyre::eyre;
-use tokio::sync::mpsc;
-
 use crate::{
     ai::{
-        self, providers::Provider, tool::{
+        providers::Provider,
+        tool::{
             Tool, bash_command::BashCommandTool, edit::EditTool, list::ListTool,
             read_file::ReadFileTool, write::WriteTool,
-        }, types::{
-            AssistantMessage, Context, ModelMessage, SystemMessage, ToolCall, ToolCallDelta, ToolCallResultMessage, ToolDefinition, UserMessage,
         },
-    }, types::{
-        AgentEvent::{self}, ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent}, UserCommand,
+        types::*,
     },
+    types::{AgentEvent, ToolStatus, TurnResult, UserCommand},
 };
+use color_eyre::{Result, eyre::eyre};
 use futures::StreamExt;
+use std::collections::{BTreeMap, HashMap};
+use tokio::sync::mpsc;
 
-pub struct Agent {
-    provider: Box<dyn Provider>,
-    sender: mpsc::Sender<AgentEvent>,
-    receiver: mpsc::Receiver<UserCommand>,
-    context: ai::types::Context,
-    tools: HashMap<String, Box<dyn Tool>>,
-    last_prompt_tokens: u64,
-    /// 上下文窗口总大小（token），用来计算使用百分比
-    context_limit: u64,
-    /// 用户是否主动终止对话
-    is_cancelled: Arc<AtomicBool>,
+/// 将合并这些操作包装起来
+#[derive(Default)]
+struct ResponseAccumulator {
+    content: String,
+    reasoning: String,
+    calls: BTreeMap<usize, ToolCallDelta>,
+    finish_reason: Option<String>,
 }
 
-impl Agent {
-    pub fn new(
-        provider: Box<dyn Provider>,
-        sender: mpsc::Sender<AgentEvent>,
-        receiver: mpsc::Receiver<UserCommand>,
-        is_cancelled: Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            provider,
-            sender,
-            receiver,
-            context: ai::types::Context::default(),
-            tools: HashMap::new(),
-            last_prompt_tokens: 0,
-            // 模型上下文窗口大小，deepseek-v4.1-flash 为 128k，可按模型调整
-            context_limit: 128_000,
-            is_cancelled,
+impl ResponseAccumulator {
+    fn push(&mut self, delta: AssistantDelta) {
+        if let Some(s) = delta.content {
+            self.content.push_str(&s);
+        }
+        if let Some(s) = delta.reasoning {
+            self.reasoning.push_str(&s);
+        }
+        if delta.finish_reason.is_some() {
+            self.finish_reason = delta.finish_reason;
+        }
+        for delta in delta.tool_calls {
+            let call = self.calls.entry(delta.index).or_insert(ToolCallDelta {
+                index: delta.index,
+                id: None,
+                name: None,
+                arguments: None,
+            });
+            if delta.id.is_some() {
+                call.id = delta.id;
+            }
+            if delta.name.is_some() {
+                call.name = delta.name;
+            }
+            if let Some(s) = delta.arguments {
+                call.arguments.get_or_insert_default().push_str(&s);
+            }
         }
     }
 
-    fn take_cancel(&self) -> bool {
-        self.is_cancelled
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    fn finish(self) -> Result<AssistantMessage> {
+        match self.finish_reason.as_deref() {
+            Some("stop") if self.calls.is_empty() => {}
+            Some("tool_calls") if !self.calls.is_empty() => {}
+            reason => return Err(eyre!("incomplete model response: {reason:?}")),
+        }
+        let calls = self
+            .calls
+            .into_values()
+            .map(|call| {
+                Ok(ToolCall {
+                    id: call
+                        .id
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| eyre!("missing tool id"))?,
+                    name: call
+                        .name
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| eyre!("missing tool name"))?,
+                    arguments: serde_json::from_str(
+                        &call
+                            .arguments
+                            .ok_or_else(|| eyre!("missing tool arguments"))?,
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(AssistantMessage {
+            content: Some(self.content),
+            reasoning: Some(self.reasoning),
+            tool_calls: if calls.is_empty() { None } else { Some(calls) },
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StopReason {
+    Cancel,
+    Shutdown,
+}
+
+async fn wait_for_stop(commands: &mut mpsc::Receiver<UserCommand>) -> StopReason {
+    loop {
+        match commands.recv().await {
+            Some(UserCommand::Cancel) => return StopReason::Cancel,
+            Some(UserCommand::Shutdown) | None => return StopReason::Shutdown,
+            Some(UserCommand::Submit(_)) => {}
+        }
+    }
+}
+
+pub struct Agent {
+    provider: Box<dyn Provider>,
+    events: mpsc::Sender<AgentEvent>,
+    commands: mpsc::Receiver<UserCommand>,
+    context: Context,
+    tools: HashMap<String, Box<dyn Tool>>,
+    shutdown: bool,
+}
+impl Agent {
+    pub fn new(
+        provider: Box<dyn Provider>,
+        events: mpsc::Sender<AgentEvent>,
+        commands: mpsc::Receiver<UserCommand>,
+    ) -> Self {
+        Self {
+            provider,
+            events,
+            commands,
+            context: Context::default(),
+            tools: HashMap::new(),
+            shutdown: false,
+        }
     }
 
-    async fn gen_title(
-        provider: &dyn Provider,
-        first_message: &str,
-    ) -> color_eyre::Result<String> {
+    fn commit(&mut self, message: ModelMessage) {
+        self.context.messages.push(message);
+    }
+
+    async fn gen_title(provider: &dyn Provider, first_message: &str) -> color_eyre::Result<String> {
         let system_prompt = "Generate a concise title (max 30 characters) in the same language as the user's message. Reply with the title only, no quotes or punctuation.";
 
         let context = Context {
@@ -104,203 +175,163 @@ Guidelines:
         Ok(system_prompt)
     }
 
-    pub async fn run(mut self) -> color_eyre::Result<()> {
-        // 如果是空的，说明刚启动，要加入系统提示词和我们内置的那些工具
-        if self.context.messages.is_empty() {
-            // 系统提示词
-            let prompt = self.build_system_prompt()?;
-            let prompt = ModelMessage::System(SystemMessage { content: prompt });
-            self.context.messages.push(prompt);
-            // 工具定义(要加入新的工具在这里添加就行了,吧，应该)
-            self.register_tool(ReadFileTool::default());
-            self.register_tool(ListTool::default());
-            self.register_tool(BashCommandTool::default());
-            self.register_tool(WriteTool::default());
-            self.register_tool(EditTool::default());
-        }
-        while let Some(command) = self.receiver.recv().await {
+    pub async fn run(mut self) -> Result<()> {
+        self.commit(ModelMessage::System(SystemMessage {
+            content: self.build_system_prompt()?,
+        }));
+        self.register_tool(ReadFileTool::default());
+        self.register_tool(ListTool::default());
+        self.register_tool(BashCommandTool::default());
+        self.register_tool(WriteTool::default());
+        self.register_tool(EditTool::default());
+        while let Some(command) = self.commands.recv().await {
             match command {
                 UserCommand::Submit(msg) => {
-                    // 只有会话的第一条用户消息才生成标题
-                    let is_first_message = !self
-                        .context
-                        .messages
-                        .iter()
-                        .any(|m| matches!(m, ModelMessage::User(_)));
-
-                    if is_first_message && !msg.trim().is_empty() {
-                        // 标题生成失败不影响主流程，TUI 会保留首行标题兜底
-                        if let Ok(title) = Self::gen_title(self.provider.as_ref(), &msg).await {
-                            self.sender.send(AgentEvent::Title(title)).await?;
-                        }
+                    self.events.send(AgentEvent::TurnStarted).await?;
+                    let outcome = match self.run_turn(msg).await {
+                        Ok(outcome) => outcome,
+                        Err(err) => TurnResult::Failed(err.to_string()),
+                    };
+                    if self
+                        .events
+                        .send(AgentEvent::TurnFinished(outcome))
+                        .await
+                        .is_err()
+                    {
+                        return Ok(());
                     }
-
-                    let ret = async {
-                        let user_msg = ModelMessage::User(UserMessage { content: msg });
-                        self.context.messages.push(user_msg);
-
-                        // 核心的agent循环
-                        self.agent_loop().await
-                    }
-                    .await;
-
-                    // 错误信息也一并发过去展示
-                    if let Err(err) = ret {
-                        self.sender
-                            .send(AgentEvent::Error(err.to_string()))
-                            .await?;
+                    if self.shutdown {
+                        break;
                     }
                 }
-                UserCommand::Shutdown => {
-                    return Ok(());
-                }
+                UserCommand::Cancel => {}
+                UserCommand::Shutdown => break,
             }
         }
         Ok(())
     }
 
-    pub async fn agent_loop(&mut self) -> color_eyre::Result<()> {
-        self.sender.send(AgentEvent::Started).await?;
+    async fn run_turn(&mut self, msg: String) -> Result<TurnResult> {
+        // 是否为整个turn的第一条消息
+        let first = !self
+            .context
+            .messages
+            .iter()
+            .any(|m| matches!(m, ModelMessage::User(_)));
+        // 要先判断了再提交
+        self.commit(ModelMessage::User(UserMessage {
+            content: msg.clone(),
+        }));
 
-        loop {
-            if self.take_cancel() {
-                self.sender.send(AgentEvent::Cancelled).await?;
-                self.sender.send(AgentEvent::Done).await?;
-                return Ok(());
-            }
-            let mut stream = self.provider.stream(&self.context).await?;
-            let mut reasoning_output = String::default();
-            let mut final_output = String::default();
-            let mut pending_calls: Vec<ToolCallDelta> = Vec::new();
-            while let Some(result) = stream.next().await {
-                if self.take_cancel() {
-                    self.sender.send(AgentEvent::Cancelled).await?;
-                    self.sender.send(AgentEvent::Done).await?;
-                    return Ok(());
+        if first && !msg.trim().is_empty() {
+            tokio::select! {
+                biased;
+                reason = wait_for_stop(&mut self.commands) => {
+                    self.shutdown = reason == StopReason::Shutdown;
+                    return Ok(TurnResult::Cancelled);
                 }
-                let resp = result?;
-                // 思维链
-                if let Some(reasoning_content) = resp.reasoning {
-                    reasoning_output.push_str(&reasoning_content);
-                    let reasoning_content =
-                        AgentEvent::Delta(ReasoningDelta(reasoning_content.clone()));
-                    self.sender.send(reasoning_content).await?;
+                title = Self::gen_title(self.provider.as_ref(), &msg) => {
+                    if let Ok(title) = title { self.events.send(AgentEvent::TitleUpdated(title)).await?; }
                 }
-                // 回复
-                if let Some(content) = resp.content {
-                    final_output.push_str(&content);
-                    let output_content = AgentEvent::Delta(OutputDelta(content.clone()));
-                    self.sender.send(output_content).await?;
-                }
-                // 工具调用(按照index流式拼接起来)
-                for delta in resp.tool_calls {
-                    // chunk1: {"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"read_file","arguments":""}}]}
-                    //         ->
-                    // chunk2: {"tool_calls":[{"index":0,"function":{"arguments":"{"path":""}}]}
-                    //         ->
-                    // chunk3: {"tool_calls":[{"index":0,"function":{"arguments":"src/main.rs"}}]}
-                    //         ->
-                    // chunk4: {"tool_calls":[{"index":0,"function":{"arguments":""}"}}]}
-                    while pending_calls.len() <= delta.index {
-                        // 如果没有，那就先创建
-                        pending_calls.push(ToolCallDelta {
-                            index: delta.index,
-                            id: delta.id.clone(),
-                            name: delta.name.clone(),
-                            arguments: None,
-                        });
-                    }
-                    let current_delta = &mut pending_calls[delta.index];
-
-                    // 不能默认第一个sse chunk是有name和id的
-                    if delta.name.is_some() {
-                        current_delta.name = delta.name;
-                    }
-
-                    if delta.id.is_some() {
-                        current_delta.id = delta.id;
-                    }
-
-                    if let Some(frag) = delta.arguments {
-                        current_delta
-                            .arguments
-                            .get_or_insert_default()
-                            .push_str(&frag);
-                    }
-                }
-
-                // 记录一下token数量
-                if let Some(usage) = resp.usage {
-                    self.last_prompt_tokens = usage.prompt_tokens;
-                    // 每次收到 usage 就把最新的上下文占用情况推给 TUI 的右侧栏
-                    self.sender
-                        .send(AgentEvent::Usage {
-                            prompt_tokens: usage.prompt_tokens,
-                            total_tokens: usage.total_tokens,
-                        })
-                        .await?;
-                }
-            }
-
-            // 拼接tool_call
-            let tool_calls: Vec<ToolCall> = pending_calls
-                .into_iter()
-                .map(|delta| {
-                    let arguments = delta
-                        .arguments
-                        .ok_or_else(|| eyre!("missing tool arguments"))?;
-                    let name = delta.name.ok_or_else(|| eyre!("missing tool name"))?;
-                    let id = delta.id.ok_or_else(|| eyre!("missing tool id"))?;
-                    Ok(ToolCall {
-                        arguments: serde_json::from_str(&arguments)?,
-                        name,
-                        id,
-                    })
-                })
-                .collect::<color_eyre::Result<_>>()?;
-
-            // 加入上下文
-            let assistant_msg = ModelMessage::Assistant(AssistantMessage {
-                content: Some(final_output),
-                reasoning: Some(reasoning_output),
-                tool_calls: if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls.clone())
-                },
-            });
-
-            self.context.messages.push(assistant_msg);
-
-            if tool_calls.is_empty() {
-                break;
-            }
-
-            // 执行toolcall
-            for tool_call in tool_calls {
-                // 发送工具调用给tui界面
-                let tool_call_content = AgentEvent::Delta(ToolCallContent(format!(
-                    "{} {}",
-                    tool_call.name, tool_call.arguments
-                )));
-                self.sender.send(tool_call_content).await?;
-                let content = match self.execute_tool_call(&tool_call).await {
-                    Ok(output) => output,
-                    Err(err) => {
-                        format!("tool execution failed: {err}")
-                    }
-                };
-                self.context
-                    .messages
-                    .push(ModelMessage::ToolResult(ToolCallResultMessage {
-                        tool_call_id: tool_call.id,
-                        content,
-                    }));
             }
         }
+        loop {
+            let message = tokio::select! {
+                // 同时就绪时，优先处理取消或退出。
+                biased;
+                reason = wait_for_stop(&mut self.commands) => {
+                    self.shutdown = reason == StopReason::Shutdown;
+                    return Ok(TurnResult::Cancelled);
+                }
+                response = Self::generate_response(self.provider.as_ref(), &self.context, &self.events) => response?,
+            };
+            let calls = message.tool_calls.clone().unwrap_or_default();
+            self.commit(ModelMessage::Assistant(message));
+            if calls.is_empty() {
+                return Ok(TurnResult::Completed);
+            }
+            let mut cancelled = false;
+            for call in calls {
+                // 工具调用前先检查一下用户取消没有
+                while let Ok(command) = self.commands.try_recv() {
+                    match command {
+                        UserCommand::Cancel => cancelled = true,
+                        UserCommand::Shutdown => {
+                            cancelled = true;
+                            self.shutdown = true;
+                        }
+                        UserCommand::Submit(_) => {}
+                    }
+                }
+                let (output, status) = if cancelled {
+                    ("未执行：本轮已终止".to_string(), ToolStatus::Cancelled)
+                } else {
+                    self.events
+                        .send(AgentEvent::ToolStarted(call.clone()))
+                        .await?;
+                    let execution = async {
+                        let tool = self
+                            .tools
+                            .get(&call.name)
+                            .ok_or_else(|| eyre!("unknown tool: {}", call.name))?;
+                        tool.execute(call.arguments.clone()).await
+                    };
+                    tokio::pin!(execution);
+                    let result = tokio::select! {
+                        biased;
+                        reason = wait_for_stop(&mut self.commands) => {
+                            self.shutdown = reason == StopReason::Shutdown;
+                            cancelled = true;
+                            execution.await
+                        }
+                        result = &mut execution => result,
+                    };
+                    match result {
+                        Ok(output) => (output, ToolStatus::Completed),
+                        Err(err) => (format!("tool execution failed: {err}"), ToolStatus::Failed),
+                    }
+                };
+                self.commit(ModelMessage::ToolResult(ToolCallResultMessage {
+                    tool_call_id: call.id.clone(),
+                    content: output.clone(),
+                }));
+                self.events
+                    .send(AgentEvent::ToolResult {
+                        call_id: call.id,
+                        output,
+                        status,
+                    })
+                    .await?;
+            }
+            if cancelled {
+                return Ok(TurnResult::Cancelled);
+            }
+        }
+    }
 
-        self.sender.send(AgentEvent::Done).await?;
-        Ok(())
+    async fn generate_response(
+        provider: &dyn Provider,
+        context: &Context,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> Result<AssistantMessage> {
+        let mut stream = provider.stream(context).await?;
+        let mut response = ResponseAccumulator::default();
+        while let Some(delta) = stream.next().await {
+            let delta = delta?;
+            if let Some(text) = &delta.content {
+                events.send(AgentEvent::TextDelta(text.clone())).await?;
+            }
+            if let Some(text) = &delta.reasoning {
+                events
+                    .send(AgentEvent::ReasoningDelta(text.clone()))
+                    .await?;
+            }
+            if let Some(usage) = &delta.usage {
+                events.send(AgentEvent::UsageUpdated(usage.clone())).await?;
+            }
+            response.push(delta);
+        }
+        response.finish()
     }
 
     fn register_tool<T: Tool>(&mut self, tool: T) {
@@ -315,14 +346,4 @@ Guidelines:
         self.context.tools.push(defin);
         self.tools.insert(name, Box::new(tool));
     }
-
-    async fn execute_tool_call(&self, tool_call: &ToolCall) -> color_eyre::Result<String> {
-        let tool = self
-            .tools
-            .get(&tool_call.name)
-            .ok_or_else(|| eyre!("unknown tool: {}", tool_call.name))?;
-
-        tool.execute(tool_call.arguments.clone()).await
-    }
 }
-
