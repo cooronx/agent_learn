@@ -1,11 +1,14 @@
 use async_trait::async_trait;
+use color_eyre::eyre::eyre;
 use futures::StreamExt;
 
 use crate::ai::{
-    api::openai_completions::{self, OpenAIChatCompletionRequest, OpenAIChatCompletionStreamChunk},
+    api::openai_completions::{
+        self, OpenAIChatCompletionRequest, OpenAIChatCompletionStreamChunk,
+    },
     client::OpenAIChatCompletionClient,
     providers::{Provider, ProviderStream},
-    types::{AssistantDelta, Context, Model, ToolCallDelta},
+    types::{AssistantDelta, AssistantMessage, Context, Model, ToolCallDelta},
 };
 
 pub const PROVIDER: &str = "deepseek";
@@ -29,13 +32,15 @@ impl DeepSeekProvider {
         }
     }
 
-    fn build_request(&self, context: &Context) -> OpenAIChatCompletionRequest {
+    fn build_request(&self, context: &Context, stream: bool) -> OpenAIChatCompletionRequest {
         let mut extra_args = serde_json::Map::new();
-        extra_args.insert(
-            "stream_options".to_string(),
-            serde_json::json!({"include_usage" : true}),
-        );
-        openai_completions::build_request(&self.model, context, true, extra_args)
+        if stream {
+            extra_args.insert(
+                "stream_options".to_string(),
+                serde_json::json!({"include_usage": true}),
+            );
+        }
+        openai_completions::build_request(&self.model, context, stream, extra_args)
     }
 
     fn convert_chunk(chunk: OpenAIChatCompletionStreamChunk) -> Option<AssistantDelta> {
@@ -83,7 +88,7 @@ impl DeepSeekProvider {
 #[async_trait]
 impl Provider for DeepSeekProvider {
     async fn stream(&self, context: &Context) -> color_eyre::Result<ProviderStream> {
-        let request = self.build_request(context);
+        let request = self.build_request(context, true);
         let stream = self.client.stream(request).await?;
 
         let stream = stream
@@ -95,5 +100,18 @@ impl Provider for DeepSeekProvider {
             })
             .boxed();
         Ok(stream)
+    }
+
+    async fn complete(&self, context: &Context) -> color_eyre::Result<AssistantMessage> {
+        let request = self.build_request(context, false);
+        let response = self.client.complete(request).await?;
+
+        let choice = response
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| eyre!("chat completion response has no choices"))?;
+
+        Ok(choice.message.into())
     }
 }

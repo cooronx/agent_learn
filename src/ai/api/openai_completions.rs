@@ -116,6 +116,17 @@ impl From<&ModelMessage> for OpenAIChatCompletionMessage {
     }
 }
 
+// 直接把tool_use的内容丢了，这里只是想拿到文字而已
+impl From<OpenAIChatCompletionMessage> for AssistantMessage {
+    fn from(value: OpenAIChatCompletionMessage) -> Self {
+        Self {
+            content: value.content,
+            reasoning: None,
+            tool_calls: None,
+        }
+    }
+}
+
 // ============== Tool ==================
 
 // 需要额外包装一层，因为openai的tool序列化要求如下形式

@@ -3,7 +3,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 
-use crate::ai::types::{AssistantDelta, Context};
+use crate::ai::types::{AssistantDelta, AssistantMessage, Context};
 
 pub mod deepseek;
 
@@ -13,4 +13,7 @@ pub type ProviderStream = Pin<Box<dyn Stream<Item = color_eyre::Result<Assistant
 #[async_trait]
 pub trait Provider: Send + Sync {
     async fn stream(&self, context: &Context) -> color_eyre::Result<ProviderStream>;
+
+    /// 非流式
+    async fn complete(&self, context: &Context) -> color_eyre::Result<AssistantMessage>;
 }
