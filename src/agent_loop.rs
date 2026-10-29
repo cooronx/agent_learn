@@ -3,26 +3,22 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use color_eyre::eyre::{self, eyre};
+use color_eyre::eyre::eyre;
 use tokio::sync::mpsc;
 
 use crate::{
     ai::{
-        self,
-        providers::Provider,
-        tool::{
+        self, providers::Provider, tool::{
             Tool, bash_command::BashCommandTool, edit::EditTool, list::ListTool,
             read_file::ReadFileTool, write::WriteTool,
-        },
-        types::{
-            AssistantMessage, ModelMessage, SystemMessage, ToolCall, ToolCallDelta,
-            ToolCallResultMessage, ToolDefinition, UserMessage,
+        }, types::{
+            AssistantMessage, Context, ModelMessage, SystemMessage, ToolCall, ToolCallDelta, ToolCallResultMessage, ToolDefinition, UserMessage,
         },
     }, types::{
         AgentEvent::{self}, ChoiceDelta::{OutputDelta, ReasoningDelta, ToolCallContent}, UserCommand,
     },
 };
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 
 pub struct Agent {
     provider: Box<dyn Provider>,
@@ -62,6 +58,33 @@ impl Agent {
             .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
+    async fn gen_title(
+        provider: &dyn Provider,
+        first_message: &str,
+    ) -> color_eyre::Result<String> {
+        let system_prompt = "Generate a concise title (max 30 characters) in the same language as the user's message. Reply with the title only, no quotes or punctuation.";
+
+        let context = Context {
+            messages: vec![
+                ModelMessage::System(SystemMessage {
+                    content: system_prompt.to_string(),
+                }),
+                ModelMessage::User(UserMessage {
+                    content: first_message.to_string(),
+                }),
+            ],
+            tools: Vec::new(),
+        };
+
+        let reply = provider.complete(&context).await?;
+
+        reply
+            .content
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty())
+            .ok_or_else(|| eyre!("model returned an empty title"))
+    }
+
     fn build_system_prompt(&self) -> color_eyre::Result<String> {
         let system_prompt = format!(
             r#"You are a coding agent belongs to cooronx, naming cooronx's super easy coding agent.
@@ -98,23 +121,39 @@ Guidelines:
         while let Some(command) = self.receiver.recv().await {
             match command {
                 UserCommand::Submit(msg) => {
-                        let ret = async {
-                            let user_msg = ModelMessage::User(UserMessage { content: msg });
-                            self.context.messages.push(user_msg);
-                            // 核心的agent循环
-                            self.agent_loop().await
-                        }
-                        .await;
-                        // 错误信息也一并发过去展示
-                        if let Err(err) = ret {
-                            self.sender
-                                .send(AgentEvent::Error(err.to_string()))
-                                .await?;
+                    // 只有会话的第一条用户消息才生成标题
+                    let is_first_message = !self
+                        .context
+                        .messages
+                        .iter()
+                        .any(|m| matches!(m, ModelMessage::User(_)));
+
+                    if is_first_message && !msg.trim().is_empty() {
+                        // 标题生成失败不影响主流程，TUI 会保留首行标题兜底
+                        if let Ok(title) = Self::gen_title(self.provider.as_ref(), &msg).await {
+                            self.sender.send(AgentEvent::Title(title)).await?;
                         }
                     }
-                    UserCommand::Shutdown => {
-                        return Ok(());
+
+                    let ret = async {
+                        let user_msg = ModelMessage::User(UserMessage { content: msg });
+                        self.context.messages.push(user_msg);
+
+                        // 核心的agent循环
+                        self.agent_loop().await
                     }
+                    .await;
+
+                    // 错误信息也一并发过去展示
+                    if let Err(err) = ret {
+                        self.sender
+                            .send(AgentEvent::Error(err.to_string()))
+                            .await?;
+                    }
+                }
+                UserCommand::Shutdown => {
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -286,3 +325,4 @@ Guidelines:
         tool.execute(tool_call.arguments.clone()).await
     }
 }
+

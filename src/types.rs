@@ -15,6 +15,8 @@ pub enum ChoiceDelta {
 #[derive(Debug)]
 pub enum AgentEvent {
     Started,
+    /// 模型生成的会话标题
+    Title(String),
     Delta(ChoiceDelta),
     // 用户主动取消
     Cancelled,

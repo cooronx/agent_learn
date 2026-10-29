@@ -410,6 +410,10 @@ impl App<'_> {
                 self.current_assitant_index = Some(self.display_message.len());
                 self.display_message.push(DisplayMessage::new(Assistant));
             }
+            crate::types::AgentEvent::Title(title) => {
+                // 用模型生成的标题替换首行兜底标题
+                self.session_title = Some(title);
+            }
             crate::types::AgentEvent::Delta(s) => {
                 if let Some(index) = self.current_assitant_index {
                     if let Some(display_str) = self.display_message.get_mut(index) {
