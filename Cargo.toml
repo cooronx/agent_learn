@@ -19,4 +19,5 @@ reqwest = { version = "0.13.4", features = ["json","stream"] }
 eventsource-stream = "0.2.3"
 derive_builder = "0.20"
 schemars="1.2"
-uuid = "1.28.0"
+uuid = { version = "1.28.0", features = ["v4"] }
+chrono = "0.4"
