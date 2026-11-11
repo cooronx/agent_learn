@@ -7,11 +7,15 @@ use crate::{
         },
         types::*,
     },
+    session::Session,
     types::{AgentEvent, ToolStatus, TurnResult, UserCommand},
 };
 use color_eyre::{Result, eyre::eyre};
 use futures::StreamExt;
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 use tokio::sync::mpsc;
 
 /// 将合并这些操作包装起来
@@ -110,6 +114,9 @@ pub struct Agent {
     commands: mpsc::Receiver<UserCommand>,
     context: Context,
     tools: HashMap<String, Box<dyn Tool>>,
+    session: Option<Session>,
+    session_dir: PathBuf,
+    model: String,
     shutdown: bool,
 }
 impl Agent {
@@ -117,6 +124,8 @@ impl Agent {
         provider: Box<dyn Provider>,
         events: mpsc::Sender<AgentEvent>,
         commands: mpsc::Receiver<UserCommand>,
+        session_dir: PathBuf,
+        model: String,
     ) -> Self {
         Self {
             provider,
@@ -124,12 +133,22 @@ impl Agent {
             commands,
             context: Context::default(),
             tools: HashMap::new(),
+            session: None,
+            session_dir,
+            model,
             shutdown: false,
         }
     }
 
-    fn commit(&mut self, message: ModelMessage) {
+    /// 落地历史消息
+    fn commit(&mut self, message: ModelMessage) -> Result<()> {
+        if !matches!(message, ModelMessage::System(_)) {
+            if let Some(session) = &mut self.session {
+                session.append_message(&message)?;
+            }
+        }
         self.context.messages.push(message);
+        Ok(())
     }
 
     async fn gen_title(provider: &dyn Provider, first_message: &str) -> color_eyre::Result<String> {
@@ -176,9 +195,12 @@ Guidelines:
     }
 
     pub async fn run(mut self) -> Result<()> {
-        self.commit(ModelMessage::System(SystemMessage {
-            content: self.build_system_prompt()?,
-        }));
+        self.context.messages.insert(
+            0,
+            ModelMessage::System(SystemMessage {
+                content: self.build_system_prompt()?,
+            }),
+        );
         self.register_tool(ReadFileTool::default());
         self.register_tool(ListTool::default());
         self.register_tool(BashCommandTool::default());
@@ -218,10 +240,36 @@ Guidelines:
             .messages
             .iter()
             .any(|m| matches!(m, ModelMessage::User(_)));
+
+        // 只有用户开始了第一轮才会创建会话文件
+        if first && self.session.is_none() && !msg.trim().is_empty() {
+            let fallback_title: String = msg
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(60)
+                .collect();
+            let fallback_title = if fallback_title.is_empty() {
+                "Untitled".to_string()
+            } else {
+                fallback_title
+            };
+            let cwd = std::env::current_dir()?.display().to_string();
+
+            self.session = Some(Session::create(
+                &self.session_dir,
+                &cwd,
+                &fallback_title,
+                &self.model,
+            )?);
+        }
+
         // 要先判断了再提交
         self.commit(ModelMessage::User(UserMessage {
             content: msg.clone(),
-        }));
+        }))?;
 
         if first && !msg.trim().is_empty() {
             tokio::select! {
@@ -231,7 +279,13 @@ Guidelines:
                     return Ok(TurnResult::Cancelled);
                 }
                 title = Self::gen_title(self.provider.as_ref(), &msg) => {
-                    if let Ok(title) = title { self.events.send(AgentEvent::TitleUpdated(title)).await?; }
+                    if let Ok(title) = title {
+                        // 标题落盘失败不影响本轮，UI 仍会显示生成的标题
+                        if let Some(session) = &mut self.session {
+                            let _ = session.set_title(&title);
+                        }
+                        self.events.send(AgentEvent::TitleUpdated(title)).await?;
+                    }
                 }
             }
         }
@@ -246,7 +300,7 @@ Guidelines:
                 response = Self::generate_response(self.provider.as_ref(), &self.context, &self.events) => response?,
             };
             let calls = message.tool_calls.clone().unwrap_or_default();
-            self.commit(ModelMessage::Assistant(message));
+            self.commit(ModelMessage::Assistant(message))?;
             if calls.is_empty() {
                 return Ok(TurnResult::Completed);
             }
@@ -294,7 +348,7 @@ Guidelines:
                 self.commit(ModelMessage::ToolResult(ToolCallResultMessage {
                     tool_call_id: call.id.clone(),
                     content: output.clone(),
-                }));
+                }))?;
                 self.events
                     .send(AgentEvent::ToolResult {
                         call_id: call.id,
