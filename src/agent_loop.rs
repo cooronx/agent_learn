@@ -15,6 +15,7 @@ use futures::StreamExt;
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
+    time::Duration,
 };
 use tokio::sync::mpsc;
 
@@ -168,11 +169,13 @@ impl Agent {
 
         let reply = provider.complete(&context).await?;
 
-        reply
-            .content
-            .map(|title| title.trim().to_string())
-            .filter(|title| !title.is_empty())
-            .ok_or_else(|| eyre!("model returned an empty title"))
+        let title = reply.content.unwrap_or_default();
+        let title = title.lines().next().unwrap_or("").trim();
+
+        if title.is_empty() || title.chars().count() > 60 {
+            return Err(eyre!("model returned an invalid title"));
+        }
+        Ok(title.to_string())
     }
 
     fn build_system_prompt(&self) -> color_eyre::Result<String> {
@@ -187,6 +190,8 @@ Guidelines:
 - Work within the current working directory.
 - Inspect relevant files before making changes.
 - Make the smallest changes necessary to complete the task.
+- When the user asks for a code change, actually make the change with the available tools in this turn. Do not stop after describing a plan.
+- Keep planning and internal reasoning out of the final answer; the final answer should only summarize what was actually done.
 - Verify your changes when appropriate.
 - Keep your final response concise."#,
             std::env::current_dir()?.display()
@@ -316,8 +321,11 @@ Guidelines:
                     self.shutdown = reason == StopReason::Shutdown;
                     return Ok(TurnResult::Cancelled);
                 }
-                title = Self::gen_title(self.provider.as_ref(), &msg) => {
-                    if let Ok(title) = title {
+                title = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    Self::gen_title(self.provider.as_ref(), &msg),
+                ) => {
+                    if let Ok(Ok(title)) = title {
                         // 标题落盘失败不影响本轮，UI 仍会显示生成的标题
                         if let Some(session) = &mut self.session {
                             let _ = session.set_title(&title);
