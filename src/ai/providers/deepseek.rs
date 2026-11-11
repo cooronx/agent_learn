@@ -11,7 +11,7 @@ use crate::ai::{
 
 pub const PROVIDER: &str = "deepseek";
 pub const API: &str = "openai-chat-completion";
-pub const DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
+pub const DEFAULT_MODEL: &str = "deepseek-flash";
 
 pub struct DeepSeekProvider {
     client: OpenAIChatCompletionClient,
