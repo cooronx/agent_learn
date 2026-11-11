@@ -202,6 +202,21 @@ impl App<'_> {
             .unwrap_or_else(|| "(新对话)".to_string());
         let title = truncate_right(&title, inner.width.saturating_sub(1) as usize);
 
+        // 输出速度：最近一次生成 + 本次会话平均
+        let speed = match self.last_tokens_per_second {
+            Some(value) => format!("{value:.1} token/s"),
+            None => "—".to_string(),
+        };
+        let average_seconds = self.generation_elapsed.as_secs_f64();
+        let average = if self.generated_tokens == 0 || average_seconds <= 0.0 {
+            "平均 —".to_string()
+        } else {
+            format!(
+                "平均 {:.1} token/s",
+                self.generated_tokens as f64 / average_seconds
+            )
+        };
+
         let lines = vec![
             Line::from(vec![
                 Span::styled("Token  ", Style::default().fg(Color::DarkGray)),
@@ -222,6 +237,12 @@ impl App<'_> {
                 ),
             ]),
             bar,
+            Line::default(),
+            Line::from(vec![
+                Span::styled("当前  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(speed, Style::default().fg(Color::White).bold()),
+            ]),
+            Line::from(Span::styled(average, Style::default().fg(Color::DarkGray))),
             Line::default(),
             Line::from(Span::styled(
                 "工作目录",

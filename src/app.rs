@@ -74,6 +74,12 @@ pub struct App<'a> {
     total_tokens: u64,
     /// 模型上下文窗口大小，用来计算百分比
     context_limit: u64,
+    /// 最近一次模型生成的输出速度（token/s）
+    last_tokens_per_second: Option<f64>,
+    /// 本次会话累计生成的输出 token 数
+    generated_tokens: u64,
+    /// 本次会话累计的生成耗时
+    generation_elapsed: Duration,
 }
 
 impl App<'_> {
@@ -122,6 +128,9 @@ impl App<'_> {
             prompt_tokens: 0,
             total_tokens: 0,
             context_limit,
+            last_tokens_per_second: None,
+            generated_tokens: 0,
+            generation_elapsed: Duration::ZERO,
         }
     }
 
@@ -197,6 +206,9 @@ impl App<'_> {
                 self.session_title = None;
                 self.prompt_tokens = 0;
                 self.total_tokens = 0;
+                self.last_tokens_per_second = None;
+                self.generated_tokens = 0;
+                self.generation_elapsed = Duration::ZERO;
                 self.busy = false;
                 self.stopping = false;
                 self.follow_tail = true;
@@ -213,6 +225,9 @@ impl App<'_> {
                 };
                 self.prompt_tokens = 0;
                 self.total_tokens = 0;
+                self.last_tokens_per_second = None;
+                self.generated_tokens = 0;
+                self.generation_elapsed = Duration::ZERO;
                 self.busy = false;
                 self.stopping = false;
                 self.follow_tail = true;
@@ -244,6 +259,18 @@ impl App<'_> {
             AgentEvent::UsageUpdated(usage) => {
                 self.prompt_tokens = usage.prompt_tokens;
                 self.total_tokens = usage.total_tokens;
+                None
+            }
+            AgentEvent::GenerationStats {
+                completion_tokens,
+                elapsed,
+            } => {
+                let seconds = elapsed.as_secs_f64();
+                if completion_tokens > 0 && seconds > 0.0 {
+                    self.last_tokens_per_second = Some(completion_tokens as f64 / seconds);
+                    self.generated_tokens += completion_tokens;
+                    self.generation_elapsed += elapsed;
+                }
                 None
             }
             AgentEvent::TurnFinished(outcome) => {

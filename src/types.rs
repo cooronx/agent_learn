@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use crate::ai::types::{ModelMessage, ToolCall, Usage};
 use crate::session::SessionMeta;
@@ -29,6 +29,13 @@ pub enum AgentEvent {
         status: ToolStatus,
     },
     UsageUpdated(Usage),
+    /// 一次模型流式生成结束后的吞吐统计
+    GenerationStats {
+        /// 本次生成输出的 token 数
+        completion_tokens: u64,
+        /// 从发起请求到流结束的耗时
+        elapsed: Duration,
+    },
     TurnFinished(TurnResult),
 }
 

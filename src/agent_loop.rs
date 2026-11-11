@@ -416,8 +416,10 @@ Guidelines:
         context: &Context,
         events: &mpsc::Sender<AgentEvent>,
     ) -> Result<AssistantMessage> {
+        let started_at = std::time::Instant::now();
         let mut stream = provider.stream(context).await?;
         let mut response = ResponseAccumulator::default();
+        let mut completion_tokens = 0;
         while let Some(delta) = stream.next().await {
             let delta = delta?;
             if let Some(text) = &delta.content {
@@ -429,9 +431,19 @@ Guidelines:
                     .await?;
             }
             if let Some(usage) = &delta.usage {
+                completion_tokens = usage.completion_tokens;
                 events.send(AgentEvent::UsageUpdated(usage.clone())).await?;
             }
             response.push(delta);
+        }
+        
+        if completion_tokens > 0 {
+            events
+                .send(AgentEvent::GenerationStats {
+                    completion_tokens,
+                    elapsed: started_at.elapsed(),
+                })
+                .await?;
         }
         response.finish()
     }
