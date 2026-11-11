@@ -1,4 +1,7 @@
-use crate::ai::types::{ToolCall, Usage};
+use std::path::PathBuf;
+
+use crate::ai::types::{ModelMessage, ToolCall, Usage};
+use crate::session::SessionMeta;
 
 #[derive(Debug)]
 pub enum Role {
@@ -10,6 +13,12 @@ pub enum Role {
 #[derive(Debug)]
 pub enum AgentEvent {
     TurnStarted,
+    SessionCleared,
+    SessionLoaded {
+        meta: SessionMeta,
+        messages: Vec<ModelMessage>,
+    },
+    SessionLoadFailed(String),
     TitleUpdated(String),
     TextDelta(String),
     ReasoningDelta(String),
@@ -38,6 +47,8 @@ pub enum TurnResult {
 
 pub enum UserCommand {
     Submit(String),
+    NewSession,
+    Resume(PathBuf),
     Cancel,
     Shutdown,
 }

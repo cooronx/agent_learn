@@ -109,7 +109,9 @@ impl Session {
         };
         let mut sessions = Vec::new();
         for entry in entries {
-            let entry = entry?;
+            let Ok(entry) = entry else {
+                continue;
+            };
             let name = entry.file_name();
             let Some(id) = name
                 .to_str()
@@ -119,9 +121,11 @@ impl Session {
             };
             let path = dir.join(format!("{id}.jsonl"));
             if !path.is_file() {
-                return Err(eyre!("session message file missing: {}", path.display()));
+                continue;
             }
-            sessions.push(read_meta(&path)?);
+            if let Ok(meta) = read_meta(&path) {
+                sessions.push(meta);
+            }
         }
         sessions.sort_by(|a, b| {
             b.created_at

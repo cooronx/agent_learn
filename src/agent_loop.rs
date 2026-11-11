@@ -103,7 +103,7 @@ async fn wait_for_stop(commands: &mut mpsc::Receiver<UserCommand>) -> StopReason
         match commands.recv().await {
             Some(UserCommand::Cancel) => return StopReason::Cancel,
             Some(UserCommand::Shutdown) | None => return StopReason::Shutdown,
-            Some(UserCommand::Submit(_)) => {}
+            Some(UserCommand::Submit(_) | UserCommand::NewSession | UserCommand::Resume(_)) => {}
         }
     }
 }
@@ -194,13 +194,45 @@ Guidelines:
         Ok(system_prompt)
     }
 
-    pub async fn run(mut self) -> Result<()> {
-        self.context.messages.insert(
-            0,
-            ModelMessage::System(SystemMessage {
+    fn reset_context(&mut self) -> Result<()> {
+        self.context.messages.clear();
+        self.context
+            .messages
+            .push(ModelMessage::System(SystemMessage {
                 content: self.build_system_prompt()?,
-            }),
-        );
+            }));
+        Ok(())
+    }
+
+    async fn start_new_session(&mut self) -> Result<()> {
+        self.session = None;
+        self.reset_context()?;
+        self.events.send(AgentEvent::SessionCleared).await?;
+        Ok(())
+    }
+
+    async fn resume_session(&mut self, path: PathBuf) -> Result<()> {
+        match Session::open(&path) {
+            Ok((session, messages)) => {
+                let meta = session.meta().clone();
+                self.session = Some(session);
+                self.reset_context()?;
+                self.context.messages.extend(messages.clone());
+                self.events
+                    .send(AgentEvent::SessionLoaded { meta, messages })
+                    .await?;
+            }
+            Err(error) => {
+                self.events
+                    .send(AgentEvent::SessionLoadFailed(error.to_string()))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn run(mut self) -> Result<()> {
+        self.reset_context()?;
         self.register_tool(ReadFileTool::default());
         self.register_tool(ListTool::default());
         self.register_tool(BashCommandTool::default());
@@ -225,6 +257,12 @@ Guidelines:
                     if self.shutdown {
                         break;
                     }
+                }
+                UserCommand::NewSession => {
+                    self.start_new_session().await?;
+                }
+                UserCommand::Resume(path) => {
+                    self.resume_session(path).await?;
                 }
                 UserCommand::Cancel => {}
                 UserCommand::Shutdown => break,
@@ -314,7 +352,9 @@ Guidelines:
                             cancelled = true;
                             self.shutdown = true;
                         }
-                        UserCommand::Submit(_) => {}
+                        UserCommand::Submit(_)
+                        | UserCommand::NewSession
+                        | UserCommand::Resume(_) => {}
                     }
                 }
                 let (output, status) = if cancelled {

@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
         provider,
         event_tx,
         command_rx,
-        session_dir,
+        session_dir.clone(),
         DEFAULT_MODEL.to_string(),
     );
     let terminal = ratatui::init();
@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
         return Err(error.into());
     }
     let task = tokio::spawn(agent.run());
-    let result = App::new(command_tx.clone(), event_rx, 128_000)
+    let result = App::new(command_tx.clone(), event_rx, 128_000, session_dir)
         .run(terminal)
         .await;
     // App drops its event receiver on exit, releasing any blocked event send.

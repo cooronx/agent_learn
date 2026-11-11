@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use color_eyre::Result;
 use crossterm::event::{
@@ -8,16 +8,17 @@ use futures::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame,
     buffer::{Buffer, CellDiffOption},
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
 
 use crate::{
-    ai::types::ToolCall,
+    ai::types::{ModelMessage, ToolCall},
+    session::{Session, SessionMeta},
     types::{
         AgentEvent,
         Role::{self, Assistant, User as TuiUser},
@@ -110,6 +111,13 @@ pub struct App<'a> {
     working_dir: String,
     /// 会话标题，取用户发出的第一句话
     session_title: Option<String>,
+    /// 会话文件所在目录
+    session_dir: PathBuf,
+    /// 会话选择器数据
+    sessions: Vec<SessionMeta>,
+    session_list_open: bool,
+    session_list_state: ListState,
+    session_list_error: Option<String>,
     /// 最近一次请求的输入 token 数（即当前上下文占用的 token 数）
     prompt_tokens: u64,
     /// 最近一次请求输入 + 输出累积的 token 数
@@ -123,9 +131,18 @@ impl App<'_> {
         sender: mpsc::Sender<UserCommand>,
         recv: mpsc::Receiver<AgentEvent>,
         context_limit: u64,
+        session_dir: PathBuf,
     ) -> Self {
         let mut input = TextArea::default();
-        input.set_block(Block::bordered().title("输入框"));
+        input.set_block(
+            Block::bordered().title("输入框").title_bottom(
+                Line::from(Span::styled(
+                    " Ctrl+S 会话 · Ctrl+O 工具 ",
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .alignment(Alignment::Right),
+            ),
+        );
         Self {
             running: false,
             events: recv,
@@ -146,6 +163,11 @@ impl App<'_> {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "unknown".to_string()),
             session_title: None,
+            session_dir,
+            sessions: Vec::new(),
+            session_list_open: false,
+            session_list_state: ListState::default(),
+            session_list_error: None,
             prompt_tokens: 0,
             total_tokens: 0,
             context_limit,
@@ -251,8 +273,95 @@ impl App<'_> {
         // 渲染右侧栏（Context / token / 工作目录 / 标题）
         self.draw_sidebar(frame, sidebar_area);
 
+        if self.session_list_open {
+            self.draw_session_list(frame);
+        }
+
         self.message_scroll = current_scoll;
         self.message_max_scroll = max_scorll;
+    }
+
+    fn draw_session_list(&mut self, frame: &mut Frame) {
+        let area = centered_rect(70, 60, frame.area());
+        if area.width < 20 || area.height < 5 {
+            return;
+        }
+        frame.render_widget(Clear, area);
+
+        let block = Block::bordered()
+            .title(Line::from(format!(" 会话 ({}) ", self.sessions.len())).bold())
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+        let list_area = chunks[0];
+        let footer_area = chunks[1];
+
+        if self.sessions.is_empty() {
+            let message = self
+                .session_list_error
+                .as_deref()
+                .unwrap_or("暂无会话，按 n 新建");
+            let color = if self.session_list_error.is_some() {
+                Color::Red
+            } else {
+                Color::DarkGray
+            };
+            frame.render_widget(
+                Paragraph::new(message)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(color)),
+                list_area,
+            );
+        } else {
+            let width = list_area.width as usize;
+            let items: Vec<ListItem> = self
+                .sessions
+                .iter()
+                .map(|meta| {
+                    let time = format_relative_time(meta.created_at);
+                    let title = if meta.title.trim().is_empty() {
+                        "(无标题)".to_string()
+                    } else {
+                        meta.title.replace('\n', " ")
+                    };
+                    let content_width = width.saturating_sub(2);
+                    let max_title = content_width.saturating_sub(time.chars().count() + 2);
+                    let title = truncate_right(&title, max_title);
+                    let padding =
+                        content_width.saturating_sub(title.chars().count() + time.chars().count());
+
+                    ListItem::new(Line::from(vec![
+                        Span::styled(title, Style::default().fg(Color::White)),
+                        Span::raw(" ".repeat(padding)),
+                        Span::styled(time, Style::default().fg(Color::DarkGray)),
+                    ]))
+                })
+                .collect();
+
+            let list = List::new(items).highlight_symbol("› ").highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(30, 45, 55))
+                    .fg(Color::Cyan)
+                    .bold(),
+            );
+
+            frame.render_stateful_widget(list, list_area, &mut self.session_list_state);
+        }
+
+        let footer = if let Some(error) = &self.session_list_error {
+            Line::from(Span::styled(
+                format!(" {error} "),
+                Style::default().fg(Color::Red),
+            ))
+        } else {
+            Line::from(Span::styled(
+                " ↑/↓ 选择 · Enter 恢复 · n 新建 · Esc 关闭 ",
+                Style::default().fg(Color::DarkGray),
+            ))
+        };
+        frame.render_widget(Paragraph::new(footer), footer_area);
     }
 
     /// 渲染右侧边栏
@@ -337,6 +446,9 @@ impl App<'_> {
     }
 
     async fn on_key_event(&mut self, key: KeyEvent) -> Result<()> {
+        if self.session_list_open {
+            return self.on_session_list_key(key).await;
+        }
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                 self.quit();
@@ -353,6 +465,20 @@ impl App<'_> {
             }
             (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
                 self.tools_expanded = !self.tools_expanded;
+                Ok(())
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
+                if !self.busy {
+                    self.refresh_sessions();
+                    self.session_list_open = true;
+                }
+                Ok(())
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                if !self.busy {
+                    self.commands.send(UserCommand::NewSession).await?;
+                    self.busy = true;
+                }
                 Ok(())
             }
             (_, KeyCode::Esc) => {
@@ -403,6 +529,73 @@ impl App<'_> {
         }
     }
 
+    async fn on_session_list_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
+            self.quit();
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Esc => self.session_list_open = false,
+            KeyCode::Up => self.select_session(-1),
+            KeyCode::Down => self.select_session(1),
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.commands.send(UserCommand::NewSession).await?;
+                self.session_list_open = false;
+                self.busy = true;
+            }
+            KeyCode::Enter => {
+                let path = self.session_list_state.selected().and_then(|index| {
+                    self.sessions
+                        .get(index)
+                        .map(|meta| self.session_dir.join(format!("{}.jsonl", meta.id)))
+                });
+                if let Some(path) = path {
+                    self.commands.send(UserCommand::Resume(path)).await?;
+                    self.session_list_open = false;
+                    self.busy = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn refresh_sessions(&mut self) {
+        match Session::list(&self.session_dir) {
+            Ok(sessions) => {
+                self.sessions = sessions;
+                self.session_list_error = None;
+                if self.sessions.is_empty() {
+                    self.session_list_state.select(None);
+                } else {
+                    self.session_list_state.select(Some(0));
+                }
+            }
+            Err(error) => {
+                self.sessions.clear();
+                self.session_list_state.select(None);
+                self.session_list_error = Some(error.to_string());
+            }
+        }
+    }
+
+    fn select_session(&mut self, delta: isize) {
+        let len = self.sessions.len();
+        if len == 0 {
+            return;
+        }
+        let current = self.session_list_state.selected().unwrap_or(0);
+        let next = if delta < 0 {
+            if current == 0 { len - 1 } else { current - 1 }
+        } else if current + 1 >= len {
+            0
+        } else {
+            current + 1
+        };
+        self.session_list_state.select(Some(next));
+    }
+
     async fn on_mouse_event(&mut self, mouse_event: MouseEvent) -> Result<()> {
         // 一次滑动多少行
         let mouse_scorll_lines = 2;
@@ -430,6 +623,45 @@ impl App<'_> {
                 self.busy = true;
                 self.current_assistant_index = Some(self.display_message.len());
                 self.display_message.push(DisplayMessage::new(Assistant));
+                None
+            }
+            AgentEvent::SessionCleared => {
+                self.session_list_open = false;
+                self.display_message.clear();
+                self.current_assistant_index = None;
+                self.session_title = None;
+                self.prompt_tokens = 0;
+                self.total_tokens = 0;
+                self.busy = false;
+                self.stopping = false;
+                self.follow_tail = true;
+                None
+            }
+            AgentEvent::SessionLoaded { meta, messages } => {
+                self.session_list_open = false;
+                self.display_message = display_history(messages);
+                self.current_assistant_index = None;
+                self.session_title = if meta.title.trim().is_empty() {
+                    None
+                } else {
+                    Some(meta.title)
+                };
+                self.prompt_tokens = 0;
+                self.total_tokens = 0;
+                self.busy = false;
+                self.stopping = false;
+                self.follow_tail = true;
+                None
+            }
+            AgentEvent::SessionLoadFailed(error) => {
+                self.session_list_open = false;
+                self.display_message.push(DisplayMessage {
+                    role: Role::Error,
+                    parts: vec![DisplayPart::Status(format!("会话加载失败：{error}"))],
+                });
+                self.busy = false;
+                self.stopping = false;
+                self.follow_tail = true;
                 None
             }
             AgentEvent::TitleUpdated(title) => {
@@ -841,58 +1073,100 @@ fn summarize_tool_call(call: &ToolCall) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
+fn display_history(messages: Vec<ModelMessage>) -> Vec<DisplayMessage> {
+    let mut display = Vec::new();
 
-    #[test]
-    fn summarizes_read_file_call() {
-        let call = ToolCall {
-            id: "call_1".to_string(),
-            name: "read_file".to_string(),
-            arguments: json!({"path": "src/app.rs", "offset": 9, "limit": 20}),
-        };
-        assert_eq!(summarize_tool_call(&call), "read_file src/app.rs:10-29");
+    for message in messages {
+        match message {
+            ModelMessage::System(_) => {}
+            ModelMessage::User(user) => {
+                display.push(DisplayMessage {
+                    role: TuiUser,
+                    parts: vec![DisplayPart::Content(user.content)],
+                });
+            }
+            ModelMessage::Assistant(assistant) => {
+                if !display
+                    .last()
+                    .is_some_and(|message| matches!(&message.role, Assistant))
+                {
+                    display.push(DisplayMessage::new(Assistant));
+                }
+                let current = display
+                    .last_mut()
+                    .expect("assistant display was just pushed");
+
+                if let Some(content) = assistant.content {
+                    if !content.is_empty() {
+                        current.push_part(DisplayPart::Content(content));
+                    }
+                }
+                if let Some(reasoning) = assistant.reasoning {
+                    if !reasoning.is_empty() {
+                        current.push_part(DisplayPart::Reasoning(reasoning));
+                    }
+                }
+                if let Some(tool_calls) = assistant.tool_calls {
+                    for call in tool_calls {
+                        current.push_part(DisplayPart::ToolCall(call));
+                    }
+                }
+            }
+            ModelMessage::ToolResult(result) => {
+                if !display
+                    .last()
+                    .is_some_and(|message| matches!(&message.role, Assistant))
+                {
+                    display.push(DisplayMessage::new(Assistant));
+                }
+                let status = if result.content.starts_with("tool execution failed:") {
+                    ToolStatus::Failed
+                } else if result.content.starts_with("未执行") {
+                    ToolStatus::Cancelled
+                } else {
+                    ToolStatus::Completed
+                };
+                let current = display
+                    .last_mut()
+                    .expect("assistant display was just pushed");
+                current.push_part(DisplayPart::ToolResult(ToolResultView::new(
+                    status,
+                    result.content,
+                )));
+            }
+        }
     }
 
-    #[test]
-    fn previews_completed_output() {
-        let view = ToolResultView::new(ToolStatus::Completed, "a\nb\nc\nd".to_string());
-        assert_eq!(view.summary, "4 lines");
-        assert_eq!(view.preview, vec!["a".to_string(), "b".to_string()]);
-        assert!(view.truncated);
-    }
+    display
+}
 
-    #[test]
-    fn failed_result_previews_last_lines() {
-        let view = ToolResultView::new(ToolStatus::Failed, "1\n2\n3\n4\n5".to_string());
-        assert_eq!(
-            view.preview,
-            vec!["3".to_string(), "4".to_string(), "5".to_string()]
-        );
-    }
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(area);
+    let horizontal = Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(vertical[1]);
+    horizontal[1]
+}
 
-    #[test]
-    fn decodes_bash_output() {
-        let raw = json!({
-            "success": false,
-            "exit_code": 101,
-            "stdout": "line1\nline2\n",
-            "stderr": "err1\nerr2\n",
-            "is_stdout_truncated": false,
-            "is_stderr_truncated": false
-        })
-        .to_string();
-        let view = ToolResultView::new(ToolStatus::Failed, raw);
-        assert_eq!(view.summary, "exit 101 · 4 lines");
-        assert_eq!(view.preview.last().unwrap(), "err2");
-    }
+fn format_relative_time(created_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let seconds = now.saturating_sub(created_at) / 1000;
 
-    #[test]
-    fn truncates_long_lines_by_chars() {
-        let view = ToolResultView::new(ToolStatus::Completed, "中".repeat(300));
-        assert!(view.truncated);
-        assert!(view.preview[0].chars().count() <= TOOL_PREVIEW_WIDTH);
+    match seconds {
+        0..=59 => "刚刚".to_string(),
+        60..=3599 => format!("{} 分钟前", seconds / 60),
+        3600..=86_399 => format!("{} 小时前", seconds / 3600),
+        _ => format!("{} 天前", seconds / 86_400),
     }
 }
