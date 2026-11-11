@@ -16,10 +16,13 @@ use ratatui::{
 use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
 
-use crate::types::{
-    AgentEvent,
-    Role::{self, Assistant, User as TuiUser},
-    TurnResult, UserCommand,
+use crate::{
+    ai::types::ToolCall,
+    types::{
+        AgentEvent,
+        Role::{self, Assistant, User as TuiUser},
+        ToolStatus, TurnResult, UserCommand,
+    },
 };
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -38,8 +41,18 @@ impl tui_markdown::StyleSheet for CustomMarkdownStyle {
 enum DisplayPart {
     Content(String),
     Reasoning(String),
-    ToolCall(String),
+    ToolCall(ToolCall),
+    ToolResult(ToolResultView),
     Status(String),
+}
+
+#[derive(Debug)]
+struct ToolResultView {
+    status: ToolStatus,
+    summary: String,
+    preview: Vec<String>,
+    truncated: bool,
+    output: String,
 }
 
 #[derive(Debug)]
@@ -61,10 +74,6 @@ impl DisplayMessage {
         match (self.parts.last_mut(), &part) {
             (Some(DisplayPart::Content(existing)), DisplayPart::Content(new))
             | (Some(DisplayPart::Reasoning(existing)), DisplayPart::Reasoning(new)) => {
-                existing.push_str(new);
-            }
-            (Some(DisplayPart::ToolCall(existing)), DisplayPart::ToolCall(new)) => {
-                existing.push_str("\n");
                 existing.push_str(new);
             }
             _ => self.parts.push(part),
@@ -91,6 +100,7 @@ pub struct App<'a> {
     message_max_scroll: u16,
     follow_tail: bool,
     reasoning_expanded: bool,
+    tools_expanded: bool,
     spinner_frame: usize,
     busy: bool,
     stopping: bool,
@@ -128,6 +138,7 @@ impl App<'_> {
             follow_tail: false,
             // 2026.09.03 暂时一直设置为false，codex也没有展示给用户看思考过程，所以我们也没有必要
             reasoning_expanded: false,
+            tools_expanded: false,
             spinner_frame: 0,
             busy: false,
             stopping: false,
@@ -340,6 +351,10 @@ impl App<'_> {
                 // self.reasoning_expanded = !self.reasoning_expanded;
                 Ok(())
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
+                self.tools_expanded = !self.tools_expanded;
+                Ok(())
+            }
             (_, KeyCode::Esc) => {
                 // 用户主动终止了对话
                 if self.busy && !self.stopping {
@@ -423,17 +438,12 @@ impl App<'_> {
             }
             AgentEvent::TextDelta(text) => Some(DisplayPart::Content(text)),
             AgentEvent::ReasoningDelta(text) => Some(DisplayPart::Reasoning(text)),
-            AgentEvent::ToolStarted(call) => Some(DisplayPart::ToolCall(format!(
-                "[{}] {} {}",
-                call.id, call.name, call.arguments
-            ))),
+            AgentEvent::ToolStarted(call) => Some(DisplayPart::ToolCall(call)),
             AgentEvent::ToolResult {
-                call_id,
+                call_id: _call_id,
                 output,
                 status,
-            } => Some(DisplayPart::ToolCall(format!(
-                "[{call_id}] {status:?}: {output}"
-            ))),
+            } => Some(DisplayPart::ToolResult(ToolResultView::new(status, output))),
             AgentEvent::UsageUpdated(usage) => {
                 self.prompt_tokens = usage.prompt_tokens;
                 self.total_tokens = usage.total_tokens;
@@ -532,14 +542,57 @@ impl App<'_> {
                     DisplayPart::Status(status) => {
                         lines.push(Line::from(status.as_str()).yellow());
                     }
-                    DisplayPart::ToolCall(tool_call) => {
+                    DisplayPart::ToolCall(call) => {
                         let tool_style = Style::default().fg(Color::Yellow).italic();
+                        lines.push(Line::from(vec![
+                            Span::styled("⚙ ", tool_style),
+                            Span::styled(summarize_tool_call(call), tool_style),
+                        ]));
+                    }
+                    DisplayPart::ToolResult(view) => {
+                        let (icon, color) = match view.status {
+                            ToolStatus::Completed => ("✓", Color::Green),
+                            ToolStatus::Failed => ("✗", Color::Red),
+                            ToolStatus::Cancelled => ("⊘", Color::Yellow),
+                        };
+                        let hint = if view.truncated {
+                            if self.tools_expanded {
+                                " · Ctrl+O 收起"
+                            } else {
+                                " · Ctrl+O 展开"
+                            }
+                        } else {
+                            ""
+                        };
 
-                        for call in tool_call.split('\n') {
-                            lines.push(Line::from(vec![
-                                Span::styled("👀 ", tool_style),
-                                Span::styled(call, tool_style),
-                            ]));
+                        lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(format!("{icon} "), Style::default().fg(color).bold()),
+                            Span::styled(
+                                format!("{}{hint}", view.summary),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]));
+
+                        let output_style = match view.status {
+                            ToolStatus::Failed => Style::default().fg(Color::LightRed),
+                            _ => Style::default().fg(Color::DarkGray),
+                        };
+
+                        if self.tools_expanded {
+                            for line in view.output.lines() {
+                                lines.push(Line::from(vec![
+                                    Span::styled("  │ ", output_style),
+                                    Span::styled(line, output_style),
+                                ]));
+                            }
+                        } else {
+                            for line in &view.preview {
+                                lines.push(Line::from(vec![
+                                    Span::styled("  │ ", output_style),
+                                    Span::styled(line.clone(), output_style),
+                                ]));
+                            }
                         }
                         lines.push(Line::default());
                     }
@@ -618,4 +671,228 @@ fn truncate_right(s: &str, max: usize) -> String {
     let keep = max.saturating_sub(1);
     let head: String = chars[..keep].iter().collect();
     format!("{head}…")
+}
+
+const TOOL_PREVIEW_WIDTH: usize = 100;
+
+impl ToolResultView {
+    fn new(status: ToolStatus, raw_output: String) -> Self {
+        let (exit_summary, output) = decode_tool_output(raw_output);
+        let lines: Vec<&str> = output.lines().collect();
+        let total = lines.len();
+
+        let (preview_limit, from_end) = match status {
+            ToolStatus::Completed => (2, false),
+            ToolStatus::Failed => (3, true),
+            ToolStatus::Cancelled => (0, false),
+        };
+
+        let horizontally_truncated = lines
+            .iter()
+            .any(|line| line.chars().count() > TOOL_PREVIEW_WIDTH);
+        let truncated =
+            status != ToolStatus::Cancelled && (total > preview_limit || horizontally_truncated);
+
+        let preview = if status == ToolStatus::Cancelled {
+            Vec::new()
+        } else if from_end && total > preview_limit {
+            lines[total - preview_limit..]
+                .iter()
+                .map(|line| truncate_right(line, TOOL_PREVIEW_WIDTH))
+                .collect()
+        } else {
+            lines
+                .iter()
+                .take(preview_limit)
+                .map(|line| truncate_right(line, TOOL_PREVIEW_WIDTH))
+                .collect()
+        };
+
+        let summary = if status == ToolStatus::Cancelled {
+            "未执行".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if let Some(exit) = exit_summary {
+                parts.push(exit);
+            }
+            match total {
+                0 => parts.push("no output".to_string()),
+                1 => parts.push("1 line".to_string()),
+                n => parts.push(format!("{n} lines")),
+            }
+            parts.join(" · ")
+        };
+
+        Self {
+            status,
+            summary,
+            preview,
+            truncated,
+            output,
+        }
+    }
+}
+
+/// bash_command 的返回值是 JSON，折叠展示时只取 stdout/stderr 和退出码。
+fn decode_tool_output(raw: String) -> (Option<String>, String) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (None, raw);
+    };
+    let Some(object) = value.as_object() else {
+        return (None, raw);
+    };
+    let Some(stdout) = object.get("stdout").and_then(|value| value.as_str()) else {
+        return (None, raw);
+    };
+    let stderr = object
+        .get("stderr")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    let mut output = String::new();
+    output.push_str(stdout);
+    if !stderr.is_empty() {
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(stderr);
+    }
+
+    let tool_truncated = object
+        .get("is_stdout_truncated")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || object
+            .get("is_stderr_truncated")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    if tool_truncated {
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str("[output truncated by tool]");
+    }
+
+    let exit = Some(
+        match object.get("exit_code").and_then(|value| value.as_i64()) {
+            Some(code) => format!("exit {code}"),
+            None => "exit ?".to_string(),
+        },
+    );
+    (exit, output)
+}
+
+fn summarize_tool_call(call: &ToolCall) -> String {
+    let args = &call.arguments;
+    let summary = match call.name.as_str() {
+        "read_file" => {
+            let path = args
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            let offset = args.get("offset").and_then(|value| value.as_u64());
+            let limit = args.get("limit").and_then(|value| value.as_u64());
+            match (offset, limit) {
+                (Some(offset), Some(limit)) => {
+                    format!("{path}:{}-{}", offset + 1, offset + limit)
+                }
+                (Some(offset), None) => format!("{path}:{}", offset + 1),
+                (None, Some(limit)) => format!("{path}:1-{limit}"),
+                (None, None) => path.to_string(),
+            }
+        }
+        "bash_command" => {
+            let command = args
+                .get("command")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            format!("$ {}", command.replace('\n', " ; "))
+        }
+        "edit" => {
+            let path = args
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            let edits = args
+                .get("edits")
+                .and_then(|value| value.as_array())
+                .map(|edits| edits.len())
+                .unwrap_or(0);
+            format!("{path} ({edits} edits)")
+        }
+        "write" => args
+            .get("path")
+            .and_then(|value| value.as_str())
+            .unwrap_or("?")
+            .to_string(),
+        "ls" => args
+            .get("path")
+            .and_then(|value| value.as_str())
+            .unwrap_or(".")
+            .to_string(),
+        _ => serde_json::to_string(args).unwrap_or_default(),
+    };
+
+    let summary = truncate_right(&summary, TOOL_PREVIEW_WIDTH);
+    if summary.is_empty() {
+        call.name.clone()
+    } else {
+        format!("{} {}", call.name, summary)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn summarizes_read_file_call() {
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": "src/app.rs", "offset": 9, "limit": 20}),
+        };
+        assert_eq!(summarize_tool_call(&call), "read_file src/app.rs:10-29");
+    }
+
+    #[test]
+    fn previews_completed_output() {
+        let view = ToolResultView::new(ToolStatus::Completed, "a\nb\nc\nd".to_string());
+        assert_eq!(view.summary, "4 lines");
+        assert_eq!(view.preview, vec!["a".to_string(), "b".to_string()]);
+        assert!(view.truncated);
+    }
+
+    #[test]
+    fn failed_result_previews_last_lines() {
+        let view = ToolResultView::new(ToolStatus::Failed, "1\n2\n3\n4\n5".to_string());
+        assert_eq!(
+            view.preview,
+            vec!["3".to_string(), "4".to_string(), "5".to_string()]
+        );
+    }
+
+    #[test]
+    fn decodes_bash_output() {
+        let raw = json!({
+            "success": false,
+            "exit_code": 101,
+            "stdout": "line1\nline2\n",
+            "stderr": "err1\nerr2\n",
+            "is_stdout_truncated": false,
+            "is_stderr_truncated": false
+        })
+        .to_string();
+        let view = ToolResultView::new(ToolStatus::Failed, raw);
+        assert_eq!(view.summary, "exit 101 · 4 lines");
+        assert_eq!(view.preview.last().unwrap(), "err2");
+    }
+
+    #[test]
+    fn truncates_long_lines_by_chars() {
+        let view = ToolResultView::new(ToolStatus::Completed, "中".repeat(300));
+        assert!(view.truncated);
+        assert!(view.preview[0].chars().count() <= TOOL_PREVIEW_WIDTH);
+    }
 }

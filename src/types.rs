@@ -23,7 +23,7 @@ pub enum AgentEvent {
     TurnFinished(TurnResult),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Completed,
     Failed,
