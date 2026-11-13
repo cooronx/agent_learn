@@ -8,6 +8,19 @@ use tokio::process::Command;
 
 use crate::ai::tool::Tool;
 
+// 进程组
+struct ProcessGroupGuard (i32);
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        unsafe {
+            // 正pid是进程，负pid是进程组
+            libc::kill(-self.0,libc::SIGKILL);
+        }
+    }
+}
+
+
 #[derive(Default)]
 pub struct BashCommandTool;
 
@@ -88,11 +101,18 @@ impl Tool for BashCommandTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .kill_on_drop(true);
 
-        let output = tokio::time::timeout(Duration::from_millis(timeout_ms), process.output())
-            .await
-            .map_err(|_| eyre!("command timed out after {timeout_ms} ms"))??;
+        let child = process.spawn()?;
+        let process_group = ProcessGroupGuard (
+            child.id().ok_or_else(||eyre!("missing child process id"))? as i32,
+        );
+        let result = tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await;
+        // 杀掉整个进程组
+        drop(process_group);
+        let output = result.map_err(|_|eyre!("command time out after {timeout_ms} ms"))??;
+
 
         let truncate = |bytes: &[u8]| -> (String, bool) {
             let text = String::from_utf8_lossy(bytes);

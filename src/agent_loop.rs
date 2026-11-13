@@ -384,13 +384,20 @@ Guidelines:
                         reason = wait_for_stop(&mut self.commands) => {
                             self.shutdown = reason == StopReason::Shutdown;
                             cancelled = true;
-                            execution.await
+                            if call.name == "bash_command" {
+                                // bash 命令可能很长，直接终止了就完事
+                                None
+                            } else {
+                                // 剩下的都是文件操作命令，所以最好不要中途直接杀掉
+                                Some(execution.await)
+                            }
                         }
-                        result = &mut execution => result,
+                        result = &mut execution => Some(result),
                     };
                     match result {
-                        Ok(output) => (output, ToolStatus::Completed),
-                        Err(err) => (format!("tool execution failed: {err}"), ToolStatus::Failed),
+                        None => ("命令已被取消; 取消前可能产生了修改".to_string(),ToolStatus::Cancelled),
+                        Some(Ok(output)) => (output, ToolStatus::Completed),
+                        Some(Err(err)) => (format!("tool execution failed: {err}"), ToolStatus::Failed),
                     }
                 };
                 self.commit(ModelMessage::ToolResult(ToolCallResultMessage {
